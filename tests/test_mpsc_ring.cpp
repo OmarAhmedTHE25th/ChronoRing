@@ -5,37 +5,39 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <thread>
 #include <vector>
 
 namespace chronoring::test {
 
-TEST(MpscRingTest, SingleThreadedWrapAroundAndBatchPop) {
+TEST(MpscRingTest, SingleThreadedWrapAroundStatusAndSpanPop) {
     MpscRingBuffer<std::uint64_t, 8> ring;
     EXPECT_EQ(ring.capacity(), 8U);
     EXPECT_TRUE(ring.empty());
 
     for (std::uint64_t round = 0; round < 10; ++round) {
         for (std::uint64_t i = 0; i < 8; ++i) {
-            EXPECT_TRUE(ring.try_push(round * 100ULL + i));
+            EXPECT_EQ(ring.try_push_status(round * 100ULL + i), RingStatus::Ok);
         }
-        EXPECT_FALSE(ring.try_push(9999ULL));
+        EXPECT_EQ(ring.try_push_status(9999ULL), RingStatus::Full);
         EXPECT_EQ(ring.size_approx(), 8U);
 
         std::uint64_t out[4]{};
-        EXPECT_EQ(ring.try_pop_batch(out, 4), 4U);
+        EXPECT_EQ(ring.try_pop_batch(std::span<std::uint64_t>(out)), 4U);
         for (std::uint64_t i = 0; i < 4; ++i) {
             EXPECT_EQ(out[i], round * 100ULL + i);
         }
         for (std::uint64_t i = 4; i < 8; ++i) {
             std::uint64_t val = 0;
-            EXPECT_TRUE(ring.try_pop(val));
+            EXPECT_EQ(ring.try_pop_status(val), RingStatus::Ok);
             EXPECT_EQ(val, round * 100ULL + i);
         }
         std::uint64_t extra = 0;
-        EXPECT_FALSE(ring.try_pop(extra));
+        EXPECT_EQ(ring.try_pop_status(extra), RingStatus::Empty);
         EXPECT_TRUE(ring.empty());
     }
 }
@@ -98,6 +100,41 @@ TEST(MpscRingTest, MultiProducerContentionAndLinearization) {
         EXPECT_EQ(next_expected[p], kPerProducer);
     }
     EXPECT_TRUE(ring->empty());
+}
+
+TEST(MpscRingTest, BlockingPushPopWaitAndTimeout) {
+    MpscRingBuffer<std::uint64_t, 4> ring;
+    std::uint64_t tmp = 0;
+    EXPECT_FALSE(ring.pop_wait(tmp, std::chrono::microseconds(200)));
+
+    for (std::uint64_t i = 0; i < 4; ++i) {
+        EXPECT_TRUE(ring.push_wait(i));
+    }
+    EXPECT_FALSE(ring.push_wait(999ULL, std::chrono::microseconds(200)));
+
+    for (std::uint64_t i = 0; i < 4; ++i) {
+        EXPECT_TRUE(ring.pop_wait(tmp));
+        EXPECT_EQ(tmp, i);
+    }
+
+    constexpr std::uint64_t kCount = 2000;
+    std::thread producer([&]() {
+        for (std::uint64_t i = 0; i < kCount; ++i) {
+            EXPECT_TRUE(ring.push_wait(i));
+        }
+    });
+
+    std::thread consumer([&]() {
+        std::uint64_t val = 0;
+        for (std::uint64_t i = 0; i < kCount; ++i) {
+            EXPECT_TRUE(ring.pop_wait(val));
+            EXPECT_EQ(val, i);
+        }
+    });
+
+    producer.join();
+    consumer.join();
+    EXPECT_TRUE(ring.empty());
 }
 
 TEST(LatencyHistogramTest, ConcurrentRecordingAndQuantiles) {

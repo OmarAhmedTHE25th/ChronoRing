@@ -1,17 +1,22 @@
 #pragma once
 
 #include "chronoring/event_frame.hpp"
+#include "chronoring/status.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
 namespace chronoring {
 
+// Lock-free bounded Multi-Producer Single-Consumer ring buffer (Vyukov per-slot sequence).
 template <typename T, std::size_t Capacity>
 class MpscRingBuffer {
     static_assert(Capacity >= 2 && (Capacity & (Capacity - 1)) == 0,
@@ -34,6 +39,16 @@ public:
     MpscRingBuffer(MpscRingBuffer&&) = delete;
     MpscRingBuffer& operator=(MpscRingBuffer&&) = delete;
 
+    [[nodiscard]] RingStatus try_push_status(const T& item) noexcept(
+        std::is_nothrow_copy_assignable_v<T>) {
+        return try_push(item) ? RingStatus::Ok : RingStatus::Full;
+    }
+
+    [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(
+        std::is_nothrow_move_assignable_v<T>) {
+        return try_pop(out) ? RingStatus::Ok : RingStatus::Empty;
+    }
+
     [[nodiscard]] bool try_push(const T& item) noexcept(std::is_nothrow_copy_assignable_v<T>) {
         return try_emplace(item);
     }
@@ -55,6 +70,11 @@ public:
                 if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                     slot.data = T(std::forward<Args>(args)...);
                     slot.sequence.store(pos + 1, std::memory_order_release);
+                    std::atomic_thread_fence(std::memory_order_seq_cst);
+                    if (waiters_empty_.load(std::memory_order_relaxed) != 0) {
+                        not_empty_epoch_.fetch_add(1, std::memory_order_release);
+                        not_empty_epoch_.notify_one();
+                    }
                     return true;
                 }
             } else if (diff < 0) {
@@ -75,8 +95,16 @@ public:
             return false;
         }
         out = std::move(slot.data);
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            slot.data = T{};
+        }
         slot.sequence.store(pos + Capacity, std::memory_order_release);
         dequeue_pos_.store(pos + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (waiters_full_.load(std::memory_order_relaxed) != 0) {
+            not_full_epoch_.fetch_add(1, std::memory_order_release);
+            not_full_epoch_.notify_all();
+        }
         return true;
     }
 
@@ -96,14 +124,121 @@ public:
                 break;
             }
             out[popped] = std::move(slot.data);
+            if constexpr (!std::is_trivially_destructible_v<T>) {
+                slot.data = T{};
+            }
             slot.sequence.store(pos + Capacity, std::memory_order_release);
             ++pos;
             ++popped;
         }
         if (popped > 0) {
             dequeue_pos_.store(pos, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (waiters_full_.load(std::memory_order_relaxed) != 0) {
+                not_full_epoch_.fetch_add(1, std::memory_order_release);
+                not_full_epoch_.notify_all();
+            }
         }
         return popped;
+    }
+
+    [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(
+        std::is_nothrow_move_assignable_v<T>) {
+        return try_pop_batch(out.data(), out.size());
+    }
+
+    // Blocking push with adaptive spin -> yield -> futex (std::atomic::wait) backoff.
+    [[nodiscard]] bool push_wait(
+        const T& item,
+        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept {
+        if (try_push(item)) {
+            return true;
+        }
+        const bool infinite = (max_wait == std::chrono::microseconds::max());
+        const auto deadline =
+            infinite ? std::chrono::steady_clock::time_point::max()
+                     : (std::chrono::steady_clock::now() + max_wait);
+
+        for (int spin = 0; spin < 32; ++spin) {
+            if (try_push(item)) {
+                return true;
+            }
+            if (spin >= 16) {
+                std::this_thread::yield();
+            }
+        }
+
+        for (;;) {
+            if (!infinite && std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            if (infinite) {
+                const std::uint32_t epoch =
+                    not_full_epoch_.load(std::memory_order_acquire);
+                waiters_full_.fetch_add(1, std::memory_order_seq_cst);
+                if (try_push(item)) {
+                    waiters_full_.fetch_sub(1, std::memory_order_relaxed);
+                    return true;
+                }
+                not_full_epoch_.wait(epoch, std::memory_order_acquire);
+                waiters_full_.fetch_sub(1, std::memory_order_relaxed);
+            } else {
+                if (try_push(item)) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+            if (try_push(item)) {
+                return true;
+            }
+        }
+    }
+
+    // Blocking pop with adaptive spin -> yield -> futex (std::atomic::wait) backoff.
+    [[nodiscard]] bool pop_wait(
+        T& out,
+        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept {
+        if (try_pop(out)) {
+            return true;
+        }
+        const bool infinite = (max_wait == std::chrono::microseconds::max());
+        const auto deadline =
+            infinite ? std::chrono::steady_clock::time_point::max()
+                     : (std::chrono::steady_clock::now() + max_wait);
+
+        for (int spin = 0; spin < 32; ++spin) {
+            if (try_pop(out)) {
+                return true;
+            }
+            if (spin >= 16) {
+                std::this_thread::yield();
+            }
+        }
+
+        for (;;) {
+            if (!infinite && std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            if (infinite) {
+                const std::uint32_t epoch =
+                    not_empty_epoch_.load(std::memory_order_acquire);
+                waiters_empty_.fetch_add(1, std::memory_order_seq_cst);
+                if (try_pop(out)) {
+                    waiters_empty_.fetch_sub(1, std::memory_order_relaxed);
+                    return true;
+                }
+                not_empty_epoch_.wait(epoch, std::memory_order_acquire);
+                waiters_empty_.fetch_sub(1, std::memory_order_relaxed);
+            } else {
+                if (try_pop(out)) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+            if (try_pop(out)) {
+                return true;
+            }
+        }
     }
 
     [[nodiscard]] std::size_t size_approx() const noexcept {
@@ -132,6 +267,10 @@ private:
 
     alignas(kCacheLineSize) std::atomic<std::size_t> enqueue_pos_{0};
     alignas(kCacheLineSize) std::atomic<std::size_t> dequeue_pos_{0};
+    alignas(kCacheLineSize) std::atomic<std::uint32_t> not_empty_epoch_{0};
+    std::atomic<std::uint32_t> waiters_empty_{0};
+    alignas(kCacheLineSize) std::atomic<std::uint32_t> not_full_epoch_{0};
+    std::atomic<std::uint32_t> waiters_full_{0};
     alignas(kCacheLineSize) std::array<Slot, Capacity> slots_{};
 };
 
