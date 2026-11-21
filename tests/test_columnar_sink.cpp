@@ -290,4 +290,70 @@ TEST(ColumnarSinkTest, EndToEndPipelineSoAStagingConfigAndPrometheus) {
     std::filesystem::remove(path, ec);
 }
 
+TEST(ColumnarSinkTest, Lz4CompressionRoundTripAndCorruptionDetection) {
+    const std::filesystem::path path = temp_file_path("lz4_comp");
+    constexpr std::size_t kTotal = 3000;
+
+    std::size_t compressed_file_bytes = 0;
+    {
+        ColumnarSink sink(path.string(), 4, kColAll, true);
+        ASSERT_TRUE(sink.is_open()) << sink.last_error();
+        EXPECT_TRUE(sink.compression_enabled());
+
+        std::vector<EventFrame> batch(500);
+        for (std::size_t base = 0; base < kTotal; base += batch.size()) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                batch[i] = make_test_event(base + i, true);
+            }
+            EXPECT_EQ(sink.write_batch(std::span<const EventFrame>(batch)), batch.size());
+        }
+        sink.close();
+        compressed_file_bytes = sink.bytes_written();
+        EXPECT_EQ(sink.pages_written(), 3U);
+        EXPECT_LT(compressed_file_bytes, 3U * sizeof(ColumnarPage));
+    }
+
+    {
+        ColumnarReader reader(path.string());
+        ASSERT_TRUE(reader.is_open()) << reader.last_error();
+        EXPECT_EQ(reader.num_pages(), 3U);
+        EXPECT_EQ(reader.total_events(), kTotal);
+        EXPECT_TRUE(reader.verify_all_pages());
+
+        ColumnarPage page{};
+        ASSERT_TRUE(reader.read_page(0, page));
+        EXPECT_EQ(page.header.event_count, kColumnarPageEvents);
+        EXPECT_EQ(page.sequence_id[42], 42U);
+
+        std::uint64_t scanned = 0;
+        const auto replay = reader.replay_filtered(TriggerConfig{}, SimdBackend::Auto, &scanned);
+        ASSERT_TRUE(replay.has_value());
+        EXPECT_EQ(scanned, kTotal);
+        EXPECT_EQ(*replay, kTotal);
+    }
+
+    // Corrupt a compressed payload byte on page 1
+    {
+        std::fstream fs(path, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(fs.is_open());
+        fs.seekg(static_cast<std::streamoff>(sizeof(ColumnarPageHeader) + 8U));
+        char b = 0;
+        fs.read(&b, 1);
+        b ^= 0x3C;
+        fs.seekp(static_cast<std::streamoff>(sizeof(ColumnarPageHeader) + 8U));
+        fs.write(&b, 1);
+    }
+
+    {
+        ColumnarReader reader(path.string());
+        ASSERT_TRUE(reader.is_open());
+        std::size_t bad_idx = 999;
+        EXPECT_FALSE(reader.verify_all_pages(&bad_idx));
+        EXPECT_EQ(bad_idx, 0U);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
 } // namespace chronoring::test
