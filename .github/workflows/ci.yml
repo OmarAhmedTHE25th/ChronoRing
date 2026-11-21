@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
+  linux:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
@@ -24,7 +24,7 @@ jobs:
             cc: clang
             cxx: clang++
             build_type: Release
-            cmake_flags: ""
+            cmake_flags: "-DCHRONORING_BUILD_SHARED=ON"
             run_bench: false
           - name: ASan + UBSan
             cc: clang
@@ -63,13 +63,56 @@ jobs:
       - name: Run unit tests (CTest)
         run: ctest --test-dir build --output-on-failure
 
-      - name: Run CLI demo & JSON report smoke check
+      - name: Run CLI demo, replay, Prometheus & JSON report
         if: matrix.build_type == 'Release'
         run: |
-          ./build/chronoring --demo 50000
+          ./build/chronoring --version
+          ./build/chronoring --demo 50000 build/demo.crng
+          ./build/chronoring --replay build/demo.crng
+          ./build/chronoring --prometheus 20000 | grep -q chronoring_events_submitted_total
           ./build/chronoring --json-report build/report.json
           test -s build/report.json
 
-      - name: Run Google Benchmark smoke suite
+      - name: Run Google Benchmark JSON export
         if: matrix.run_bench
-        run: ./build/bench_chronoring --benchmark_min_time=0.05s
+        run: |
+          ./build/bench_chronoring --benchmark_min_time=0.05s \
+            --benchmark_out=build/bench_results.json \
+            --benchmark_out_format=json
+
+      - name: Upload benchmark artifacts
+        if: matrix.run_bench
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronoring-linux-benchmarks
+          path: |
+            build/report.json
+            build/bench_results.json
+
+  macos:
+    name: macOS Clang Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCHRONORING_BUILD_BENCHMARKS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Run unit tests (CTest)
+        run: ctest --test-dir build --output-on-failure
+      - name: Run CLI smoke check
+        run: ./build/Release/chronoring --demo 25000 || ./build/chronoring --demo 25000
+
+  windows:
+    name: Windows MSVC Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure CMake
+        run: cmake -S . -B build -DCHRONORING_BUILD_BENCHMARKS=OFF
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Run unit tests (CTest)
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Run CLI smoke check
+        run: .\build\Release\chronoring.exe --demo 25000

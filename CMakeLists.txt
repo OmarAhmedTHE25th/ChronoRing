@@ -1,12 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
-project(ChronoRing VERSION 1.0.0 LANGUAGES CXX)
+project(ChronoRing VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 option(CHRONORING_BUILD_TESTS "Build ChronoRing unit tests" ON)
 option(CHRONORING_BUILD_BENCHMARKS "Build ChronoRing Google Benchmarks" ON)
+option(CHRONORING_BUILD_SHARED "Build chronoring_core as a shared library" OFF)
 option(CHRONORING_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(CHRONORING_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
@@ -40,21 +44,41 @@ elseif(CHRONORING_ENABLE_TSAN)
     endif()
 endif()
 
-add_library(chronoring_core STATIC
-    src/simd_trigger.cpp
-    src/shm_ring.cpp
-    src/columnar_sink.cpp
-)
+if(CHRONORING_BUILD_SHARED)
+    add_library(chronoring_core SHARED
+        src/simd_trigger.cpp
+        src/shm_ring.cpp
+        src/columnar_sink.cpp
+        src/c_api.cpp
+    )
+    target_compile_definitions(chronoring_core
+        PRIVATE CHRONORING_SHARED_BUILD
+        INTERFACE CHRONORING_SHARED_USE
+    )
+    set_target_properties(chronoring_core PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+    )
+else()
+    add_library(chronoring_core STATIC
+        src/simd_trigger.cpp
+        src/shm_ring.cpp
+        src/columnar_sink.cpp
+        src/c_api.cpp
+    )
+endif()
+
+add_library(ChronoRing::chronoring_core ALIAS chronoring_core)
+
 target_include_directories(chronoring_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(chronoring_core
     PUBLIC
         Threads::Threads
     PRIVATE
-        chronoring_warnings
+        $<BUILD_INTERFACE:chronoring_warnings>
 )
 if(UNIX AND NOT APPLE)
     target_link_libraries(chronoring_core PUBLIC rt)
@@ -66,7 +90,31 @@ add_executable(chronoring
 target_link_libraries(chronoring
     PRIVATE
         chronoring_core
-        chronoring_warnings
+        $<BUILD_INTERFACE:chronoring_warnings>
+)
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/chronoring.pc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/chronoring.pc
+    @ONLY
+)
+
+install(TARGETS chronoring_core chronoring
+    EXPORT ChronoRingTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(DIRECTORY include/chronoring
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(EXPORT ChronoRingTargets
+    FILE ChronoRingTargets.cmake
+    NAMESPACE ChronoRing::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ChronoRing
+)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/chronoring.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
 )
 
 if(CHRONORING_BUILD_TESTS OR CHRONORING_BUILD_BENCHMARKS)
@@ -82,6 +130,7 @@ if(CHRONORING_BUILD_TESTS)
         FetchContent_Declare(
             googletest
             URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+            URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
         FetchContent_MakeAvailable(googletest)
@@ -100,7 +149,7 @@ if(CHRONORING_BUILD_TESTS)
         target_link_libraries(${test_name}
             PRIVATE
                 chronoring_core
-                chronoring_warnings
+                $<BUILD_INTERFACE:chronoring_warnings>
                 GTest::gtest_main
         )
         add_test(NAME ${test_name} COMMAND ${test_name})
@@ -117,6 +166,7 @@ if(CHRONORING_BUILD_BENCHMARKS)
         FetchContent_Declare(
             googlebenchmark
             URL https://github.com/google/benchmark/archive/refs/tags/v1.8.3.tar.gz
+            URL_HASH SHA256=6bc180a57d23d4d9515519f92b0c83d61b05b5bab188961f36ac7b06b0d9e9ce
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
         FetchContent_MakeAvailable(googlebenchmark)
@@ -126,7 +176,7 @@ if(CHRONORING_BUILD_BENCHMARKS)
     target_link_libraries(bench_chronoring
         PRIVATE
             chronoring_core
-            chronoring_warnings
+            $<BUILD_INTERFACE:chronoring_warnings>
             benchmark::benchmark
     )
 endif()
