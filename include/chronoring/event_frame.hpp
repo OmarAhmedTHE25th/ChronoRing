@@ -30,6 +30,11 @@ enum ColumnProjectionMask : std::uint16_t {
     kColAll             = 0x001Fu
 };
 
+enum PageFlags : std::uint16_t {
+    kPageFlagNone = 0u,
+    kPageFlagLz4  = 1u << 8
+};
+
 struct alignas(kCacheLineSize) EventFrame {
     std::uint64_t timestamp_ns{0};
     std::uint64_t sequence_id{0};
@@ -64,7 +69,8 @@ struct alignas(kCacheLineSize) ColumnarPageHeader {
     std::uint64_t last_sequence_id{0};
     std::uint32_t data_crc32c{0};
     std::uint32_t header_crc32c{0};
-    std::uint64_t reserved{0};
+    std::uint32_t compressed_bytes{0};
+    std::uint32_t projection_mask{kColAll};
 };
 
 static_assert(sizeof(ColumnarPageHeader) == 64, "ColumnarPageHeader must be exactly 64 bytes");
