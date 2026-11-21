@@ -29,6 +29,7 @@ namespace chronoring {
 
 struct PipelineConfig {
     std::string output_path{};
+    std::string secondary_output_path{};
     TriggerConfig trigger{};
     SimdBackend simd_backend{SimdBackend::Auto};
     int consumer_cpu_core{-1};
@@ -101,6 +102,19 @@ public:
                 last_status_.store(sink_.last_status(), std::memory_order_release);
                 emit_log(LogLevel::Error, sink_.last_status(), "pipeline",
                          sink_.last_error());
+                return false;
+            }
+        }
+        if (!config_.secondary_output_path.empty()) {
+            if (!secondary_sink_.open(config_.secondary_output_path,
+                                      config_.initial_page_capacity,
+                                      config_.projection_mask,
+                                      config_.enable_compression)) {
+                sink_errors_.fetch_add(1, std::memory_order_relaxed);
+                last_status_.store(secondary_sink_.last_status(), std::memory_order_release);
+                emit_log(LogLevel::Error, secondary_sink_.last_status(), "pipeline",
+                         secondary_sink_.last_error());
+                sink_.close();
                 return false;
             }
         }
@@ -200,6 +214,13 @@ public:
             pages_written_.store(sink_.pages_written(), std::memory_order_relaxed);
             if (sink_.last_status() != RingStatus::Ok) {
                 last_status_.store(sink_.last_status(), std::memory_order_release);
+                sink_errors_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (secondary_sink_.is_open()) {
+            secondary_sink_.close();
+            if (secondary_sink_.last_status() != RingStatus::Ok) {
+                last_status_.store(secondary_sink_.last_status(), std::memory_order_release);
                 sink_errors_.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -356,6 +377,20 @@ private:
                          "ColumnarSink partial/failed batch write", kept - wrote);
             }
         }
+        if (kept > 0 && secondary_sink_.is_open()) {
+            const std::size_t wrote2 =
+                secondary_sink_.write_batch(batch_filtered_.data(), kept);
+            if (wrote2 < kept || secondary_sink_.last_status() != RingStatus::Ok) {
+                sink_errors_.fetch_add(1, std::memory_order_relaxed);
+                const RingStatus err_st =
+                    (secondary_sink_.last_status() != RingStatus::Ok)
+                        ? secondary_sink_.last_status()
+                        : RingStatus::IoError;
+                last_status_.store(err_st, std::memory_order_release);
+                emit_log(LogLevel::Error, err_st, "pipeline",
+                         "Secondary ColumnarSink partial/failed batch write", kept - wrote2);
+            }
+        }
         const std::uint64_t done_ns = monotonic_now_ns();
         for (std::size_t i = 0; i < n; ++i) {
             const std::uint64_t lat =
@@ -409,6 +444,7 @@ private:
     std::unique_ptr<ColumnarPage> soa_staging_;
     std::array<std::uint64_t, kColumnarPageEvents / 64u> bitmask_words_{};
     ColumnarSink sink_;
+    ColumnarSink secondary_sink_;
     LatencyHistogram histogram_;
 
     std::vector<StampedFrame> batch_stamped_;
