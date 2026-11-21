@@ -356,4 +356,55 @@ TEST(ColumnarSinkTest, Lz4CompressionRoundTripAndCorruptionDetection) {
     std::filesystem::remove(path, ec);
 }
 
+TEST(ColumnarSinkTest, DualWriteAdaptiveBatchingAndRejectReasons) {
+    const std::filesystem::path primary = temp_file_path("dual_p");
+    const std::filesystem::path secondary = temp_file_path("dual_s");
+
+    PipelineConfig cfg;
+    cfg.output_path = primary.string();
+    cfg.secondary_output_path = secondary.string();
+    cfg.enable_compression = true;
+    cfg.adaptive_batching = true;
+    cfg.min_batch_size = 16;
+    cfg.max_batch_size = 512;
+    cfg.trigger.min_energy_mev = 5.0f;
+
+    TelemetryPipeline pipeline(cfg);
+    ASSERT_TRUE(pipeline.start());
+
+    constexpr std::size_t kEvents = 4000;
+    for (std::size_t i = 0; i < kEvents; ++i) {
+        const bool pass = (i % 4U) != 0U;
+        pipeline.submit_wait(make_test_event(i, pass));
+    }
+    pipeline.stop();
+
+    const PipelineStats stats = pipeline.stats();
+    EXPECT_EQ(stats.last_status, RingStatus::Ok);
+    EXPECT_EQ(stats.sink_errors, 0U);
+    EXPECT_EQ(stats.passed_events, 3000U);
+    EXPECT_EQ(stats.rejected_events, 1000U);
+    EXPECT_EQ(stats.reject_reasons[0], 1000U); // energy_low
+
+    const std::string prom = to_prometheus_text(stats);
+    EXPECT_NE(prom.find("chronoring_reject_reason_total{reason=\"energy_low\"} 1000"),
+              std::string::npos);
+    EXPECT_NE(prom.find("chronoring_last_status{status=\"Ok\"} 0"), std::string::npos);
+
+    ColumnarReader r1(primary.string());
+    ColumnarReader r2(secondary.string());
+    ASSERT_TRUE(r1.is_open());
+    ASSERT_TRUE(r2.is_open());
+    EXPECT_TRUE(r1.verify_all_pages());
+    EXPECT_TRUE(r2.verify_all_pages());
+    EXPECT_EQ(r1.total_events(), 3000U);
+    EXPECT_EQ(r2.total_events(), 3000U);
+    r1.close();
+    r2.close();
+
+    std::error_code ec;
+    std::filesystem::remove(primary, ec);
+    std::filesystem::remove(secondary, ec);
+}
+
 } // namespace chronoring::test
