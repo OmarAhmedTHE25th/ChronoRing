@@ -3,6 +3,7 @@
 #include "chronoring/columnar_sink.hpp"
 #include "chronoring/event_frame.hpp"
 #include "chronoring/latency_histogram.hpp"
+#include "chronoring/numa.hpp"
 #include "chronoring/simd_trigger.hpp"
 #include "chronoring/spsc_ring.hpp"
 #include "chronoring/status.hpp"
@@ -24,19 +25,6 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#elif defined(__linux__)
-#include <pthread.h>
-#include <sched.h>
-#endif
-
 namespace chronoring {
 
 struct PipelineConfig {
@@ -45,9 +33,14 @@ struct PipelineConfig {
     SimdBackend simd_backend{SimdBackend::Auto};
     int consumer_cpu_core{-1};
     std::size_t batch_size{256};
+    std::size_t min_batch_size{16};
+    std::size_t max_batch_size{1024};
     std::size_t initial_page_capacity{64};
     std::uint16_t projection_mask{kColAll};
     bool use_soa_staging{true};
+    bool enable_compression{false};
+    bool adaptive_batching{true};
+    double backpressure_threshold{0.75};
 };
 
 struct PipelineStats {
@@ -56,9 +49,12 @@ struct PipelineStats {
     std::uint64_t consumed_events{0};
     std::uint64_t passed_events{0};
     std::uint64_t rejected_events{0};
+    std::array<std::uint64_t, 5> reject_reasons{};
     std::uint64_t pages_written{0};
     std::uint64_t sink_errors{0};
     std::uint64_t backpressure_waits{0};
+    double ring_fill_ratio{0.0};
+    bool backpressured{false};
     RingStatus last_status{RingStatus::Ok};
     double elapsed_seconds{0.0};
     double throughput_meps{0.0};
@@ -71,30 +67,6 @@ struct PipelineStats {
     double mean_ns{0.0};
 };
 
-inline bool pin_current_thread_to_core(int core_id) noexcept {
-    if (core_id < 0) {
-        return false;
-    }
-#ifdef _WIN32
-    if (core_id >= 64) {
-        return false;
-    }
-    const DWORD_PTR mask = DWORD_PTR{1} << static_cast<unsigned>(core_id);
-    return SetThreadAffinityMask(GetCurrentThread(), mask) != 0;
-#elif defined(__linux__)
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    if (core_id >= CPU_SETSIZE) {
-        return false;
-    }
-    CPU_SET(core_id, &cpuset);
-    return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0;
-#else
-    (void)core_id;
-    return false;
-#endif
-}
-
 class TelemetryPipeline {
 public:
     static constexpr std::size_t kRingCapacity = 16384;
@@ -103,7 +75,8 @@ public:
         : config_(std::move(config)),
           ring_(std::make_unique<SpscRingBuffer<StampedFrame, kRingCapacity>>()),
           soa_staging_(std::make_unique<ColumnarPage>()) {
-        const std::size_t bsz = std::max<std::size_t>(1, config_.batch_size);
+        const std::size_t bsz = std::max<std::size_t>(
+            1, std::max(config_.batch_size, config_.max_batch_size));
         batch_stamped_.resize(bsz);
         batch_frames_.resize(bsz);
         batch_filtered_.resize(bsz);
@@ -123,7 +96,8 @@ public:
         last_status_.store(RingStatus::Ok, std::memory_order_relaxed);
         if (!config_.output_path.empty()) {
             if (!sink_.open(config_.output_path, config_.initial_page_capacity,
-                            config_.projection_mask)) {
+                            config_.projection_mask, config_.enable_compression)) {
+                sink_errors_.fetch_add(1, std::memory_order_relaxed);
                 last_status_.store(sink_.last_status(), std::memory_order_release);
                 emit_log(LogLevel::Error, sink_.last_status(), "pipeline",
                          sink_.last_error());
@@ -136,6 +110,9 @@ public:
         consumed_.store(0, std::memory_order_relaxed);
         passed_.store(0, std::memory_order_relaxed);
         rejected_.store(0, std::memory_order_relaxed);
+        for (auto& r : reject_reasons_) {
+            r.store(0, std::memory_order_relaxed);
+        }
         pages_written_.store(0, std::memory_order_relaxed);
         sink_errors_.store(0, std::memory_order_relaxed);
         backpressure_waits_.store(0, std::memory_order_relaxed);
@@ -147,17 +124,34 @@ public:
         return true;
     }
 
-    [[nodiscard]] bool submit(const EventFrame& frame) noexcept {
+    [[nodiscard]] RingStatus submit_status(const EventFrame& frame) noexcept {
+        if (!running_.load(std::memory_order_acquire)) {
+            return RingStatus::Closed;
+        }
         const std::uint64_t now_ns = monotonic_now_ns();
         const StampedFrame sf{frame, now_ns};
-        if (ring_->try_push(sf)) {
+        const RingStatus st = ring_->try_push_status(sf);
+        if (st == RingStatus::Ok) {
             submitted_.fetch_add(1, std::memory_order_relaxed);
-            return true;
+            return RingStatus::Ok;
         }
         dropped_.fetch_add(1, std::memory_order_relaxed);
-        emit_log(LogLevel::Warn, RingStatus::Full, "pipeline",
+        emit_log(LogLevel::Warn, st, "pipeline",
                  "Ingestion ring full; frame dropped", frame.sequence_id);
-        return false;
+        return st;
+    }
+
+    [[nodiscard]] bool submit(const EventFrame& frame) noexcept {
+        return submit_status(frame) == RingStatus::Ok;
+    }
+
+    [[nodiscard]] double ring_fill_ratio() const noexcept {
+        return static_cast<double>(ring_->size_approx()) /
+               static_cast<double>(kRingCapacity);
+    }
+
+    [[nodiscard]] bool is_backpressured() const noexcept {
+        return ring_fill_ratio() >= config_.backpressure_threshold;
     }
 
     void submit_wait(const EventFrame& frame) noexcept {
@@ -224,9 +218,14 @@ public:
         s.consumed_events = consumed_.load(std::memory_order_relaxed);
         s.passed_events = passed_.load(std::memory_order_relaxed);
         s.rejected_events = rejected_.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < s.reject_reasons.size(); ++i) {
+            s.reject_reasons[i] = reject_reasons_[i].load(std::memory_order_relaxed);
+        }
         s.pages_written = pages_written_.load(std::memory_order_relaxed);
         s.sink_errors = sink_errors_.load(std::memory_order_relaxed);
         s.backpressure_waits = backpressure_waits_.load(std::memory_order_relaxed);
+        s.ring_fill_ratio = ring_fill_ratio();
+        s.backpressured = is_backpressured();
         s.last_status = last_status_.load(std::memory_order_acquire);
         s.elapsed_seconds = secs;
         s.throughput_meps =
@@ -306,6 +305,30 @@ private:
         return total_kept;
     }
 
+    void record_reject_reasons(std::size_t n) noexcept {
+        std::array<std::uint64_t, 5> local{};
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::uint8_t m =
+                diagnose_reject_reasons(batch_stamped_[i].frame, config_.trigger);
+            if (m == kRejectNone) {
+                continue;
+            }
+            if ((m & kRejectMinEnergy) != 0u) { ++local[0]; }
+            if ((m & kRejectMaxEnergy) != 0u) { ++local[1]; }
+            if ((m & kRejectTiming) != 0u) { ++local[2]; }
+            if ((m & kRejectPileup) != 0u) { ++local[3]; }
+            if ((m & (kRejectRequiredFlags | kRejectForbiddenFlags |
+                      kRejectMultiplicity | kRejectTriggerMask)) != 0u) {
+                ++local[4];
+            }
+        }
+        for (std::size_t b = 0; b < local.size(); ++b) {
+            if (local[b] > 0) {
+                reject_reasons_[b].fetch_add(local[b], std::memory_order_relaxed);
+            }
+        }
+    }
+
     void process_batch(std::size_t n) noexcept {
         std::size_t kept = 0;
         if (config_.use_soa_staging && n >= 8) {
@@ -317,14 +340,19 @@ private:
             kept = filter_events(batch_frames_.data(), n, config_.trigger,
                                  batch_filtered_.data(), config_.simd_backend);
         }
+        if (kept < n) {
+            record_reject_reasons(n);
+        }
 
         if (kept > 0 && sink_.is_open()) {
             const std::size_t wrote = sink_.write_batch(batch_filtered_.data(), kept);
             pages_written_.store(sink_.pages_written(), std::memory_order_relaxed);
-            if (wrote < kept) {
+            if (wrote < kept || sink_.last_status() != RingStatus::Ok) {
                 sink_errors_.fetch_add(1, std::memory_order_relaxed);
-                last_status_.store(sink_.last_status(), std::memory_order_release);
-                emit_log(LogLevel::Error, sink_.last_status(), "pipeline",
+                const RingStatus err_st =
+                    (sink_.last_status() != RingStatus::Ok) ? sink_.last_status() : RingStatus::IoError;
+                last_status_.store(err_st, std::memory_order_release);
+                emit_log(LogLevel::Error, err_st, "pipeline",
                          "ColumnarSink partial/failed batch write", kept - wrote);
             }
         }
@@ -345,16 +373,29 @@ private:
         if (config_.consumer_cpu_core >= 0) {
             (void)pin_current_thread_to_core(config_.consumer_cpu_core);
         }
-        const std::size_t max_batch = batch_stamped_.size();
+        const std::size_t cap_batch = batch_stamped_.size();
+        const std::size_t min_batch =
+            std::clamp<std::size_t>(config_.min_batch_size, 1, cap_batch);
+        std::size_t cur_batch =
+            std::clamp<std::size_t>(config_.batch_size, min_batch, cap_batch);
+
         for (;;) {
-            const std::size_t n = ring_->try_pop_batch(batch_stamped_.data(), max_batch);
+            if (config_.adaptive_batching) {
+                const std::size_t qdepth = ring_->size_approx();
+                if (qdepth >= cur_batch * 2U) {
+                    cur_batch = std::min(cap_batch, cur_batch * 2U);
+                } else if (qdepth < cur_batch / 2U && cur_batch > min_batch) {
+                    cur_batch = std::max(min_batch, cur_batch / 2U);
+                }
+            }
+            const std::size_t n = ring_->try_pop_batch(batch_stamped_.data(), cur_batch);
             if (n > 0) {
                 process_batch(n);
                 continue;
             }
             if (stop_requested_.load(std::memory_order_acquire)) {
                 while (const std::size_t rem =
-                           ring_->try_pop_batch(batch_stamped_.data(), max_batch)) {
+                           ring_->try_pop_batch(batch_stamped_.data(), cap_batch)) {
                     process_batch(rem);
                 }
                 break;
@@ -383,6 +424,7 @@ private:
     std::atomic<std::uint64_t> consumed_{0};
     std::atomic<std::uint64_t> passed_{0};
     std::atomic<std::uint64_t> rejected_{0};
+    std::array<std::atomic<std::uint64_t>, 5> reject_reasons_{};
     std::atomic<std::uint64_t> pages_written_{0};
     std::atomic<std::uint64_t> sink_errors_{0};
     std::atomic<std::uint64_t> backpressure_waits_{0};
@@ -518,6 +560,13 @@ private:
         << "# HELP chronoring_events_rejected_total Events rejected by SIMD trigger engine\n"
         << "# TYPE chronoring_events_rejected_total counter\n"
         << "chronoring_events_rejected_total " << stats.rejected_events << "\n"
+        << "# HELP chronoring_reject_reason_total Trigger rejections broken down by predicate\n"
+        << "# TYPE chronoring_reject_reason_total counter\n"
+        << "chronoring_reject_reason_total{reason=\"energy_low\"} " << stats.reject_reasons[0] << "\n"
+        << "chronoring_reject_reason_total{reason=\"energy_high\"} " << stats.reject_reasons[1] << "\n"
+        << "chronoring_reject_reason_total{reason=\"timing\"} " << stats.reject_reasons[2] << "\n"
+        << "chronoring_reject_reason_total{reason=\"pileup\"} " << stats.reject_reasons[3] << "\n"
+        << "chronoring_reject_reason_total{reason=\"flags_other\"} " << stats.reject_reasons[4] << "\n"
         << "# HELP chronoring_pages_written_total Columnar pages persisted to disk\n"
         << "# TYPE chronoring_pages_written_total counter\n"
         << "chronoring_pages_written_total " << stats.pages_written << "\n"
@@ -527,6 +576,17 @@ private:
         << "# HELP chronoring_backpressure_waits_total Producer waits on full ring\n"
         << "# TYPE chronoring_backpressure_waits_total counter\n"
         << "chronoring_backpressure_waits_total " << stats.backpressure_waits << "\n"
+        << "# HELP chronoring_last_status Final or current pipeline RingStatus (0 = Ok)\n"
+        << "# TYPE chronoring_last_status gauge\n"
+        << "chronoring_last_status{status=\"" << status_string(stats.last_status) << "\"} "
+        << static_cast<unsigned>(stats.last_status) << "\n"
+        << std::fixed << std::setprecision(4)
+        << "# HELP chronoring_ring_fill_ratio Current ingestion ring occupancy ratio [0..1]\n"
+        << "# TYPE chronoring_ring_fill_ratio gauge\n"
+        << "chronoring_ring_fill_ratio " << stats.ring_fill_ratio << "\n"
+        << "# HELP chronoring_backpressured Whether ring occupancy exceeds backpressure threshold\n"
+        << "# TYPE chronoring_backpressured gauge\n"
+        << "chronoring_backpressured " << (stats.backpressured ? 1 : 0) << "\n"
         << std::fixed << std::setprecision(3)
         << "# HELP chronoring_throughput_meps Pipeline throughput in million events/sec\n"
         << "# TYPE chronoring_throughput_meps gauge\n"
