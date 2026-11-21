@@ -50,4 +50,18 @@ ChronoRing uses **Castagnoli CRC32C** (`0x82F63B78`, accelerated via SSE4.2 `_mm
 ### On-Disk `.crng` Format (Little-Endian, Version 1)
 Each `.crng` file is a sequence of `N` fixed-size `ColumnarPage` records (`57,408` bytes each):
 - **Bytes `0..63`**: `ColumnarPageHeader` (`magic = 0x43524E47` `"CRNG"`, `version = 1`, `flags` = `ColumnProjectionMask`, `event_count`, `capacity = 1024`, `min_timestamp_ns`, `max_timestamp_ns`, `first_sequence_id`, `last_sequence_id`, `data_crc32c`, `header_crc32c`, `reserved`).
-- **Bytes `64..57407`**: 13 contiguous, 64-byte-aligned SoA column arrays of length `1024` (unused tail entries zero-filled before CRC32C).
+- **Bytes `64..57407` (uncompressed)**: 13 contiguous, 64-byte-aligned SoA column arrays of length `1024` (unused tail entries zero-filled before CRC32C).
+- **LZ4-compressed pages (`flags & kPageFlagLz4`)**: Bytes `64..(64 + compressed_bytes - 1)` hold the raw LZ4-block compressed SoA body; `data_crc32c` is computed over the compressed payload and `header_crc32c` over the 64-byte header.
+
+### On-Disk Versioning Policy
+
+- `kColumnarFormatVersion` (`1`) identifies breaking structural changes to the 64-byte `ColumnarPageHeader` or uncompressed SoA column layout.
+- Additive, backward-compatible extensions (such as `kPageFlagLz4` or `projection_mask` metadata in header bytes `56..63`) use `header.flags` bits and keep `version == 1`. Readers reject unknown `version` values with `RingStatus::UnsupportedVersion` or `RingStatus::CorruptedPage`.
+
+## 6. Memory-Order & Threading Contracts
+
+- **`SpscRingBuffer` / `SpscFanOut`**: Strictly single-producer, single-consumer per channel. `head` is published with `memory_order_release` after slot writes; consumer reads `head` with `memory_order_acquire`. Shadow cursors avoid cross-core cache-line invalidation on non-boundary steps. Rings require `std::is_move_constructible_v<T> || std::is_copy_constructible_v<T>`.
+- **`MpscRingBuffer`**: Lock-free multi-producer, single-consumer (Vyukov bounded MPMC sequence protocol). Producers claim slots via `fetch_add(1, relaxed)` or CAS loop and publish readiness via `slot.sequence.store(pos + 1, release)`. Single consumer reads `slot.sequence.load(acquire)`.
+- **`ShmRingBuffer`**: Cross-process SPSC over POSIX `shm_open` + `mmap` (or Win32 `CreateFileMappingA` + `MapViewOfFile`). Requires `std::atomic<uint64_t>::is_always_lock_free`.
+- **`ColumnarSink`**: Single-writer-thread only; external synchronization is required if multiple threads invoke `write`, `flush`, or `close` concurrently.
+
