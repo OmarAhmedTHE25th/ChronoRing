@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -153,15 +154,17 @@ std::uint32_t crc32c(const void* data, std::size_t len,
 }
 
 void transpose_aos_to_soa(const EventFrame* frames, std::size_t count,
-                          ColumnarPage& page) noexcept {
+                          ColumnarPage& page, std::uint16_t projection_mask) noexcept {
     const std::size_t n =
         (frames == nullptr) ? 0 : std::min<std::size_t>(count, kColumnarPageEvents);
+    const std::uint16_t mask =
+        (projection_mask == 0u) ? static_cast<std::uint16_t>(kColAll) : projection_mask;
 
-    page.header = ColumnarPageHeader{};
+    page = ColumnarPage{};
+    page.header.flags = mask;
     page.header.event_count = static_cast<std::uint32_t>(n);
 
     if (n == 0) {
-        zero_unused_page_tail(page, 0);
         finalize_page_crc(page);
         return;
     }
@@ -170,19 +173,29 @@ void transpose_aos_to_soa(const EventFrame* frames, std::size_t count,
     std::uint64_t max_ts = 0;
     for (std::size_t i = 0; i < n; ++i) {
         const EventFrame& f = frames[i];
-        page.timestamp_ns[i] = f.timestamp_ns;
-        page.sequence_id[i] = f.sequence_id;
-        page.detector_id[i] = f.detector_id;
-        page.channel_id[i] = f.channel_id;
-        page.energy_mev[i] = f.energy_mev;
-        page.timing_ps[i] = f.timing_ps;
-        page.pos_x_mm[i] = f.pos_x_mm;
-        page.pos_y_mm[i] = f.pos_y_mm;
-        page.pos_z_mm[i] = f.pos_z_mm;
-        page.pileup_score[i] = f.pileup_score;
-        page.quality_flags[i] = f.quality_flags;
-        page.multiplicity[i] = f.multiplicity;
-        page.trigger_mask[i] = f.trigger_mask;
+        if ((mask & kColTimestamps) != 0u) {
+            page.timestamp_ns[i] = f.timestamp_ns;
+            page.sequence_id[i] = f.sequence_id;
+        }
+        if ((mask & kColDetectorChannel) != 0u) {
+            page.detector_id[i] = f.detector_id;
+            page.channel_id[i] = f.channel_id;
+        }
+        if ((mask & kColKinematics) != 0u) {
+            page.energy_mev[i] = f.energy_mev;
+            page.timing_ps[i] = f.timing_ps;
+            page.pileup_score[i] = f.pileup_score;
+        }
+        if ((mask & kColPositions) != 0u) {
+            page.pos_x_mm[i] = f.pos_x_mm;
+            page.pos_y_mm[i] = f.pos_y_mm;
+            page.pos_z_mm[i] = f.pos_z_mm;
+        }
+        if ((mask & kColQualityTrigger) != 0u) {
+            page.quality_flags[i] = f.quality_flags;
+            page.multiplicity[i] = f.multiplicity;
+            page.trigger_mask[i] = f.trigger_mask;
+        }
 
         min_ts = std::min(min_ts, f.timestamp_ns);
         max_ts = std::max(max_ts, f.timestamp_ns);
@@ -263,8 +276,9 @@ bool verify_page_crc(const ColumnarPage& page) noexcept {
 // ColumnarSink
 // ============================================================================
 
-ColumnarSink::ColumnarSink(std::string path, std::size_t initial_page_capacity) {
-    (void)open(std::move(path), initial_page_capacity);
+ColumnarSink::ColumnarSink(std::string path, std::size_t initial_page_capacity,
+                           std::uint16_t projection_mask) {
+    (void)open(std::move(path), initial_page_capacity, projection_mask);
 }
 
 ColumnarSink::~ColumnarSink() {
@@ -274,6 +288,9 @@ ColumnarSink::~ColumnarSink() {
 ColumnarSink::ColumnarSink(ColumnarSink&& other) noexcept
     : path_(std::move(other.path_)),
       last_error_(std::move(other.last_error_)),
+      last_status_(other.last_status_),
+      projection_mask_(other.projection_mask_),
+      staging_page_(std::move(other.staging_page_)),
       pages_(other.pages_),
       mapped_page_capacity_(other.mapped_page_capacity_),
       committed_pages_(other.committed_pages_),
@@ -308,6 +325,9 @@ ColumnarSink& ColumnarSink::operator=(ColumnarSink&& other) noexcept {
         close();
         path_ = std::move(other.path_);
         last_error_ = std::move(other.last_error_);
+        last_status_ = other.last_status_;
+        projection_mask_ = other.projection_mask_;
+        staging_page_ = std::move(other.staging_page_);
         pages_ = other.pages_;
         mapped_page_capacity_ = other.mapped_page_capacity_;
         committed_pages_ = other.committed_pages_;
@@ -335,29 +355,41 @@ ColumnarSink& ColumnarSink::operator=(ColumnarSink&& other) noexcept {
     return *this;
 }
 
-bool ColumnarSink::open(std::string path, std::size_t initial_page_capacity) {
+bool ColumnarSink::open(std::string path, std::size_t initial_page_capacity,
+                        std::uint16_t projection_mask) {
     close();
     path_ = std::move(path);
     last_error_.clear();
+    last_status_ = RingStatus::Ok;
+    projection_mask_ =
+        (projection_mask == 0u) ? static_cast<std::uint16_t>(kColAll) : projection_mask;
     committed_pages_ = 0;
     active_page_count_ = 0;
     total_events_ = 0;
+
+    if (!staging_page_) {
+        staging_page_ = std::make_unique<ColumnarPage>();
+    }
 
     const std::size_t cap = std::max<std::size_t>(initial_page_capacity, 4);
 
 #ifdef _WIN32
     HANDLE fh = CreateFileA(path_.c_str(), GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fh == INVALID_HANDLE_VALUE) {
+        last_status_ = RingStatus::IoError;
         last_error_ = "CreateFileA failed for ColumnarSink";
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     file_handle_ = fh;
 #else
     const int fd = ::open(path_.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
+        last_status_ = RingStatus::IoError;
         last_error_ = std::string("open failed for ColumnarSink: ") + std::strerror(errno);
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     fd_ = fd;
@@ -367,31 +399,42 @@ bool ColumnarSink::open(std::string path, std::size_t initial_page_capacity) {
         close();
         return false;
     }
-    init_active_page_header();
+    init_active_page();
     return true;
 }
 
 bool ColumnarSink::map_pages(std::size_t new_page_capacity) noexcept {
+    assert(new_page_capacity > 0);
     const std::size_t new_bytes = new_page_capacity * sizeof(ColumnarPage);
+    if (mapped_page_capacity_ > 0 && new_page_capacity > mapped_page_capacity_) {
+        emit_log(LogLevel::Info, RingStatus::Ok, "columnar_sink",
+                 "Expanding mmap columnar page capacity", new_page_capacity);
+    }
 #ifdef _WIN32
     unmap_pages();
     LARGE_INTEGER li{};
     li.QuadPart = static_cast<LONGLONG>(new_bytes);
     if (!SetFilePointerEx(static_cast<HANDLE>(file_handle_), li, nullptr, FILE_BEGIN) ||
         !SetEndOfFile(static_cast<HANDLE>(file_handle_))) {
+        last_status_ = RingStatus::IoError;
         last_error_ = "Failed to resize ColumnarSink file";
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     HANDLE mh = CreateFileMappingA(static_cast<HANDLE>(file_handle_), nullptr,
                                    PAGE_READWRITE, 0, 0, nullptr);
     if (mh == nullptr) {
+        last_status_ = RingStatus::MappingError;
         last_error_ = "CreateFileMappingA failed for ColumnarSink";
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     void* view = MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, new_bytes);
     if (view == nullptr) {
         CloseHandle(mh);
+        last_status_ = RingStatus::MappingError;
         last_error_ = "MapViewOfFile failed for ColumnarSink";
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     mapping_handle_ = mh;
@@ -405,12 +448,16 @@ bool ColumnarSink::map_pages(std::size_t new_page_capacity) noexcept {
         pages_ = nullptr;
     }
     if (::ftruncate(fd_, static_cast<off_t>(new_bytes)) != 0) {
+        last_status_ = RingStatus::IoError;
         last_error_ = std::string("ftruncate failed: ") + std::strerror(errno);
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     void* view = ::mmap(nullptr, new_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (view == MAP_FAILED) {
+        last_status_ = RingStatus::MappingError;
         last_error_ = std::string("mmap failed: ") + std::strerror(errno);
+        emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
         return false;
     }
     pages_ = static_cast<ColumnarPage*>(view);
@@ -437,12 +484,11 @@ void ColumnarSink::unmap_pages() noexcept {
 #endif
 }
 
-void ColumnarSink::init_active_page_header() noexcept {
-    if (pages_ == nullptr || committed_pages_ >= mapped_page_capacity_) {
-        return;
+void ColumnarSink::init_active_page() noexcept {
+    if (staging_page_) {
+        *staging_page_ = ColumnarPage{};
+        staging_page_->header.flags = projection_mask_;
     }
-    ColumnarPage& page = pages_[committed_pages_];
-    page = ColumnarPage{};
     active_page_count_ = 0;
     active_min_ts_ = std::numeric_limits<std::uint64_t>::max();
     active_max_ts_ = 0;
@@ -450,14 +496,50 @@ void ColumnarSink::init_active_page_header() noexcept {
     active_last_seq_ = 0;
 }
 
+void ColumnarSink::write_projected_slot(std::size_t idx, const EventFrame& f) noexcept {
+    assert(staging_page_ != nullptr);
+    assert(idx < kColumnarPageEvents);
+    ColumnarPage& page = *staging_page_;
+
+    if ((projection_mask_ & kColTimestamps) != 0u) {
+        page.timestamp_ns[idx] = f.timestamp_ns;
+        page.sequence_id[idx] = f.sequence_id;
+    }
+    if ((projection_mask_ & kColDetectorChannel) != 0u) {
+        page.detector_id[idx] = f.detector_id;
+        page.channel_id[idx] = f.channel_id;
+    }
+    if ((projection_mask_ & kColKinematics) != 0u) {
+        page.energy_mev[idx] = f.energy_mev;
+        page.timing_ps[idx] = f.timing_ps;
+        page.pileup_score[idx] = f.pileup_score;
+    }
+    if ((projection_mask_ & kColPositions) != 0u) {
+        page.pos_x_mm[idx] = f.pos_x_mm;
+        page.pos_y_mm[idx] = f.pos_y_mm;
+        page.pos_z_mm[idx] = f.pos_z_mm;
+    }
+    if ((projection_mask_ & kColQualityTrigger) != 0u) {
+        page.quality_flags[idx] = f.quality_flags;
+        page.multiplicity[idx] = f.multiplicity;
+        page.trigger_mask[idx] = f.trigger_mask;
+    }
+}
+
 bool ColumnarSink::commit_active_page() noexcept {
-    if (pages_ == nullptr || active_page_count_ == 0) {
+    if (pages_ == nullptr || !staging_page_ || active_page_count_ == 0) {
         return true;
     }
-    ColumnarPage& page = pages_[committed_pages_];
+    if (committed_pages_ >= mapped_page_capacity_) {
+        if (!map_pages(mapped_page_capacity_ * 2)) {
+            return false;
+        }
+    }
+
+    ColumnarPage& page = *staging_page_;
     page.header.magic = kColumnarPageMagic;
     page.header.version = kColumnarFormatVersion;
-    page.header.flags = 0;
+    page.header.flags = projection_mask_;
     page.header.event_count = static_cast<std::uint32_t>(active_page_count_);
     page.header.capacity = static_cast<std::uint32_t>(kColumnarPageEvents);
     page.header.min_timestamp_ns = active_min_ts_;
@@ -466,6 +548,7 @@ bool ColumnarSink::commit_active_page() noexcept {
     page.header.last_sequence_id = active_last_seq_;
     finalize_page_crc(page);
 
+    std::memcpy(static_cast<void*>(pages_ + committed_pages_), &page, sizeof(ColumnarPage));
     ++committed_pages_;
     active_page_count_ = 0;
 
@@ -474,36 +557,18 @@ bool ColumnarSink::commit_active_page() noexcept {
             return false;
         }
     }
-    init_active_page_header();
+    init_active_page();
     return true;
 }
 
 bool ColumnarSink::write(const EventFrame& frame) noexcept {
-    if (pages_ == nullptr) {
+    if (pages_ == nullptr || !staging_page_) {
+        last_status_ = RingStatus::IoError;
         return false;
     }
-    if (committed_pages_ >= mapped_page_capacity_) {
-        if (!map_pages(mapped_page_capacity_ * 2)) {
-            return false;
-        }
-    }
 
-    ColumnarPage& page = pages_[committed_pages_];
     const std::size_t idx = active_page_count_;
-
-    page.timestamp_ns[idx] = frame.timestamp_ns;
-    page.sequence_id[idx] = frame.sequence_id;
-    page.detector_id[idx] = frame.detector_id;
-    page.channel_id[idx] = frame.channel_id;
-    page.energy_mev[idx] = frame.energy_mev;
-    page.timing_ps[idx] = frame.timing_ps;
-    page.pos_x_mm[idx] = frame.pos_x_mm;
-    page.pos_y_mm[idx] = frame.pos_y_mm;
-    page.pos_z_mm[idx] = frame.pos_z_mm;
-    page.pileup_score[idx] = frame.pileup_score;
-    page.quality_flags[idx] = frame.quality_flags;
-    page.multiplicity[idx] = frame.multiplicity;
-    page.trigger_mask[idx] = frame.trigger_mask;
+    write_projected_slot(idx, frame);
 
     if (idx == 0) {
         active_min_ts_ = frame.timestamp_ns;
@@ -526,36 +591,18 @@ bool ColumnarSink::write(const EventFrame& frame) noexcept {
 
 std::size_t ColumnarSink::write_batch(const EventFrame* frames,
                                       std::size_t count) noexcept {
-    if (pages_ == nullptr || frames == nullptr || count == 0) {
+    if (pages_ == nullptr || !staging_page_ || frames == nullptr || count == 0) {
         return 0;
     }
     std::size_t written = 0;
     while (written < count) {
-        if (committed_pages_ >= mapped_page_capacity_) {
-            if (!map_pages(mapped_page_capacity_ * 2)) {
-                break;
-            }
-        }
-        ColumnarPage& page = pages_[committed_pages_];
         const std::size_t space = kColumnarPageEvents - active_page_count_;
         const std::size_t chunk = std::min(space, count - written);
 
         for (std::size_t k = 0; k < chunk; ++k) {
             const EventFrame& f = frames[written + k];
             const std::size_t idx = active_page_count_ + k;
-            page.timestamp_ns[idx] = f.timestamp_ns;
-            page.sequence_id[idx] = f.sequence_id;
-            page.detector_id[idx] = f.detector_id;
-            page.channel_id[idx] = f.channel_id;
-            page.energy_mev[idx] = f.energy_mev;
-            page.timing_ps[idx] = f.timing_ps;
-            page.pos_x_mm[idx] = f.pos_x_mm;
-            page.pos_y_mm[idx] = f.pos_y_mm;
-            page.pos_z_mm[idx] = f.pos_z_mm;
-            page.pileup_score[idx] = f.pileup_score;
-            page.quality_flags[idx] = f.quality_flags;
-            page.multiplicity[idx] = f.multiplicity;
-            page.trigger_mask[idx] = f.trigger_mask;
+            write_projected_slot(idx, f);
 
             if (active_page_count_ == 0 && k == 0) {
                 active_min_ts_ = f.timestamp_ns;
@@ -593,13 +640,19 @@ bool ColumnarSink::flush() noexcept {
 #ifdef _WIN32
     if (committed_pages_ > 0) {
         if (!FlushViewOfFile(pages_, committed_pages_ * sizeof(ColumnarPage))) {
+            last_status_ = RingStatus::IoError;
             return false;
         }
     }
     return FlushFileBuffers(static_cast<HANDLE>(file_handle_)) != FALSE;
 #else
     if (committed_pages_ > 0) {
-        ::msync(pages_, committed_pages_ * sizeof(ColumnarPage), MS_SYNC);
+        if (::msync(pages_, committed_pages_ * sizeof(ColumnarPage), MS_SYNC) != 0) {
+            last_status_ = RingStatus::IoError;
+            last_error_ = std::string("msync failed: ") + std::strerror(errno);
+            emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
+            return false;
+        }
     }
     return true;
 #endif
@@ -623,6 +676,7 @@ void ColumnarSink::close() noexcept {
 #else
     if (fd_ >= 0) {
         if (::ftruncate(fd_, static_cast<off_t>(final_bytes)) != 0) {
+            last_status_ = RingStatus::IoError;
             last_error_ = std::string("ftruncate(close) failed: ") + std::strerror(errno);
         }
         ::close(fd_);
@@ -648,6 +702,7 @@ ColumnarReader::~ColumnarReader() {
 ColumnarReader::ColumnarReader(ColumnarReader&& other) noexcept
     : path_(std::move(other.path_)),
       last_error_(std::move(other.last_error_)),
+      last_status_(other.last_status_),
       mapped_base_(other.mapped_base_),
       pages_(other.pages_),
       file_bytes_(other.file_bytes_),
@@ -678,6 +733,7 @@ ColumnarReader& ColumnarReader::operator=(ColumnarReader&& other) noexcept {
         close();
         path_ = std::move(other.path_);
         last_error_ = std::move(other.last_error_);
+        last_status_ = other.last_status_;
         mapped_base_ = other.mapped_base_;
         pages_ = other.pages_;
         file_bytes_ = other.file_bytes_;
@@ -705,18 +761,24 @@ bool ColumnarReader::open(std::string path) {
     close();
     path_ = std::move(path);
     last_error_.clear();
+    last_status_ = RingStatus::Ok;
 
 #ifdef _WIN32
-    HANDLE fh = CreateFileA(path_.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+    HANDLE fh = CreateFileA(path_.c_str(), GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (fh == INVALID_HANDLE_VALUE) {
+        last_status_ = RingStatus::IoError;
         last_error_ = "CreateFileA failed for ColumnarReader";
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     LARGE_INTEGER sz{};
     if (!GetFileSizeEx(fh, &sz)) {
         CloseHandle(fh);
+        last_status_ = RingStatus::IoError;
         last_error_ = "GetFileSizeEx failed";
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     file_bytes_ = static_cast<std::size_t>(sz.QuadPart);
@@ -729,14 +791,18 @@ bool ColumnarReader::open(std::string path) {
     HANDLE mh = CreateFileMappingA(fh, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (mh == nullptr) {
         CloseHandle(fh);
+        last_status_ = RingStatus::MappingError;
         last_error_ = "CreateFileMappingA (READ) failed";
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     void* view = MapViewOfFile(mh, FILE_MAP_READ, 0, 0, file_bytes_);
     if (view == nullptr) {
         CloseHandle(mh);
         CloseHandle(fh);
+        last_status_ = RingStatus::MappingError;
         last_error_ = "MapViewOfFile (READ) failed";
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     file_handle_ = fh;
@@ -747,13 +813,17 @@ bool ColumnarReader::open(std::string path) {
 #else
     const int fd = ::open(path_.c_str(), O_RDONLY);
     if (fd < 0) {
+        last_status_ = RingStatus::IoError;
         last_error_ = std::string("open failed for ColumnarReader: ") + std::strerror(errno);
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     struct stat st{};
     if (::fstat(fd, &st) != 0) {
         ::close(fd);
+        last_status_ = RingStatus::IoError;
         last_error_ = "fstat failed";
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     file_bytes_ = static_cast<std::size_t>(st.st_size);
@@ -766,7 +836,9 @@ bool ColumnarReader::open(std::string path) {
     void* view = ::mmap(nullptr, file_bytes_, PROT_READ, MAP_PRIVATE, fd, 0);
     if (view == MAP_FAILED) {
         ::close(fd);
+        last_status_ = RingStatus::MappingError;
         last_error_ = std::string("mmap (READ) failed: ") + std::strerror(errno);
+        emit_log(LogLevel::Error, last_status_, "columnar_reader", last_error_);
         return false;
     }
     fd_ = fd;
@@ -819,6 +891,8 @@ bool ColumnarReader::verify_all_pages(std::size_t* corrupted_page_index) const n
         if (corrupted_page_index != nullptr) {
             *corrupted_page_index = num_pages_;
         }
+        emit_log(LogLevel::Error, RingStatus::CorruptedPage, "columnar_reader",
+                 "Columnar file size is not aligned to page size", file_bytes_);
         return false;
     }
     for (std::size_t i = 0; i < num_pages_; ++i) {
@@ -826,10 +900,86 @@ bool ColumnarReader::verify_all_pages(std::size_t* corrupted_page_index) const n
             if (corrupted_page_index != nullptr) {
                 *corrupted_page_index = i;
             }
+            emit_log(LogLevel::Error, RingStatus::CorruptedPage, "columnar_reader",
+                     "CRC32C verification failed on page", i);
             return false;
         }
     }
     return true;
+}
+
+std::vector<PageIndexEntry> ColumnarReader::page_index() const {
+    std::vector<PageIndexEntry> entries;
+    entries.reserve(num_pages_);
+    for (std::size_t i = 0; i < num_pages_; ++i) {
+        const ColumnarPageHeader& h = pages_[i].header;
+        entries.push_back(PageIndexEntry{
+            i,
+            h.event_count,
+            h.min_timestamp_ns,
+            h.max_timestamp_ns,
+            h.first_sequence_id,
+            h.last_sequence_id});
+    }
+    return entries;
+}
+
+std::vector<std::size_t> ColumnarReader::find_pages_by_timestamp(
+    std::uint64_t min_ts, std::uint64_t max_ts) const {
+    std::vector<std::size_t> matches;
+    if (min_ts > max_ts) {
+        return matches;
+    }
+    for (std::size_t i = 0; i < num_pages_; ++i) {
+        const ColumnarPageHeader& h = pages_[i].header;
+        if (h.event_count == 0 || h.magic != kColumnarPageMagic) {
+            continue;
+        }
+        if (h.max_timestamp_ns >= min_ts && h.min_timestamp_ns <= max_ts) {
+            matches.push_back(i);
+        }
+    }
+    return matches;
+}
+
+Expected<std::size_t, RingStatus> ColumnarReader::find_page_by_sequence(
+    std::uint64_t sequence_id) const noexcept {
+    for (std::size_t i = 0; i < num_pages_; ++i) {
+        const ColumnarPageHeader& h = pages_[i].header;
+        if (h.event_count == 0 || h.magic != kColumnarPageMagic) {
+            continue;
+        }
+        if (sequence_id >= h.first_sequence_id && sequence_id <= h.last_sequence_id) {
+            return i;
+        }
+    }
+    return unexpected(RingStatus::Empty);
+}
+
+Expected<std::size_t, RingStatus> ColumnarReader::replay_filtered(
+    const TriggerConfig& cfg, SimdBackend backend,
+    std::uint64_t* out_total_scanned) const noexcept {
+    if (!is_open() && file_bytes_ > 0) {
+        return unexpected(RingStatus::IoError);
+    }
+    if (!size_aligned_) {
+        return unexpected(RingStatus::CorruptedPage);
+    }
+    std::size_t total_passed = 0;
+    std::uint64_t total_scanned = 0;
+    for (std::size_t i = 0; i < num_pages_; ++i) {
+        if (!verify_page_crc(pages_[i])) {
+            emit_log(LogLevel::Error, RingStatus::CorruptedPage, "columnar_reader",
+                     "Replay aborted on corrupted page", i);
+            return unexpected(RingStatus::CorruptedPage);
+        }
+        total_scanned += std::min<std::size_t>(pages_[i].header.event_count, kColumnarPageEvents);
+        total_passed += evaluate_columnar_page(pages_[i], cfg, nullptr, backend);
+    }
+    if (out_total_scanned != nullptr) {
+        *out_total_scanned = total_scanned;
+    }
+    return total_passed;
 }
 
 } // namespace chronoring

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,7 @@ TEST(ColumnarSinkTest, AosSoaRoundTripAndCrcCorruptionDetection) {
     ColumnarPage page{};
     transpose_aos_to_soa(src.data(), kPartial, page);
     EXPECT_EQ(page.header.event_count, kPartial);
+    EXPECT_EQ(page.header.flags, kColAll);
     EXPECT_TRUE(verify_page_crc(page));
 
     std::vector<EventFrame> dst(kPartial);
@@ -83,20 +85,18 @@ TEST(ColumnarSinkTest, AosSoaRoundTripAndCrcCorruptionDetection) {
         EXPECT_EQ(dst[i].quality_flags, src[i].quality_flags);
     }
 
-    // Corrupt a single payload value
     page.energy_mev[42] += 0.125f;
     EXPECT_FALSE(verify_page_crc(page));
 
-    // Re-finalize then corrupt a header byte
     finalize_page_crc(page);
     EXPECT_TRUE(verify_page_crc(page));
     page.header.max_timestamp_ns ^= 1ULL;
     EXPECT_FALSE(verify_page_crc(page));
 }
 
-TEST(ColumnarSinkTest, MmapSinkAutoGrowAndFileCorruptionDetection) {
+TEST(ColumnarSinkTest, MmapSinkAutoGrowPartialPagesAndTruncationDetection) {
     const std::filesystem::path path = temp_file_path("sink_grow");
-    constexpr std::size_t kTotal = 5000; // > 4 initial pages
+    constexpr std::size_t kTotal = 5000;
 
     {
         ColumnarSink sink(path.string(), 4);
@@ -107,11 +107,12 @@ TEST(ColumnarSinkTest, MmapSinkAutoGrowAndFileCorruptionDetection) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
                 batch[i] = make_test_event(base + i);
             }
-            EXPECT_EQ(sink.write_batch(batch.data(), batch.size()), batch.size());
+            EXPECT_EQ(sink.write_batch(std::span<const EventFrame>(batch)), batch.size());
         }
         sink.close();
         EXPECT_EQ(sink.events_written(), kTotal);
         EXPECT_EQ(sink.pages_written(), 5U);
+        EXPECT_EQ(sink.last_status(), RingStatus::Ok);
     }
 
     {
@@ -122,6 +123,29 @@ TEST(ColumnarSinkTest, MmapSinkAutoGrowAndFileCorruptionDetection) {
         EXPECT_TRUE(reader.verify_all_pages());
         EXPECT_EQ(reader.page(0).header.event_count, kColumnarPageEvents);
         EXPECT_EQ(reader.page(4).header.event_count, kTotal - 4U * kColumnarPageEvents);
+
+        // Index and seek tests
+        const auto index = reader.page_index();
+        ASSERT_EQ(index.size(), 5U);
+        EXPECT_EQ(index[2].first_sequence_id, 2048U);
+        EXPECT_EQ(index[2].last_sequence_id, 3071U);
+
+        const auto by_ts = reader.find_pages_by_timestamp(
+            index[2].min_timestamp_ns, index[2].max_timestamp_ns);
+        ASSERT_EQ(by_ts.size(), 1U);
+        EXPECT_EQ(by_ts[0], 2U);
+
+        const auto by_seq = reader.find_page_by_sequence(2500);
+        ASSERT_TRUE(by_seq.has_value());
+        EXPECT_EQ(*by_seq, 2U);
+        EXPECT_FALSE(reader.find_page_by_sequence(999'999).has_value());
+
+        // Offline SoA replay
+        std::uint64_t scanned = 0;
+        const auto replay = reader.replay_filtered(TriggerConfig{}, SimdBackend::Auto, &scanned);
+        ASSERT_TRUE(replay.has_value());
+        EXPECT_EQ(scanned, kTotal);
+        EXPECT_EQ(*replay, kTotal);
     }
 
     // Flip 1 byte inside page 2 payload on disk
@@ -144,13 +168,72 @@ TEST(ColumnarSinkTest, MmapSinkAutoGrowAndFileCorruptionDetection) {
         std::size_t bad_page = 999;
         EXPECT_FALSE(reader.verify_all_pages(&bad_page));
         EXPECT_EQ(bad_page, 2U);
+        const auto replay = reader.replay_filtered(TriggerConfig{});
+        EXPECT_FALSE(replay.has_value());
+        EXPECT_EQ(replay.error(), RingStatus::CorruptedPage);
+    }
+
+    // Truncate file by 17 bytes and confirm alignment error detection
+    std::filesystem::resize_file(path, std::filesystem::file_size(path) - 17U);
+    {
+        ColumnarReader reader(path.string());
+        ASSERT_TRUE(reader.is_open());
+        EXPECT_FALSE(reader.verify_all_pages());
+        EXPECT_FALSE(reader.replay_filtered(TriggerConfig{}).has_value());
     }
 
     std::error_code ec;
     std::filesystem::remove(path, ec);
 }
 
-TEST(ColumnarSinkTest, EndToEndTelemetryPipeline) {
+TEST(ColumnarSinkTest, ColumnProjectionAndConcurrentReaderWhileGrowing) {
+    const std::filesystem::path path = temp_file_path("proj_concurrent");
+
+    // Write 6 pages (initial capacity 4 -> triggers expansion) and read flushed pages before close()
+    ColumnarSink sink(path.string(), 4,
+                      static_cast<std::uint16_t>(kColTimestamps | kColKinematics));
+    ASSERT_TRUE(sink.is_open()) << sink.last_error();
+
+    constexpr std::size_t kFirstWave = 6U * kColumnarPageEvents;
+    for (std::size_t i = 0; i < kFirstWave; ++i) {
+        ASSERT_TRUE(sink.write(make_test_event(i)));
+    }
+    ASSERT_TRUE(sink.flush());
+    EXPECT_EQ(sink.pages_written(), 6U);
+
+    {
+        ColumnarReader live_reader(path.string());
+        ASSERT_TRUE(live_reader.is_open());
+        EXPECT_GE(live_reader.num_pages(), 6U);
+        for (std::size_t p = 0; p < 6U; ++p) {
+            EXPECT_TRUE(verify_page_crc(live_reader.page(p)));
+            EXPECT_EQ(live_reader.page(p).header.flags,
+                      static_cast<std::uint16_t>(kColTimestamps | kColKinematics));
+            // Projected-out positions remain zero
+            EXPECT_FLOAT_EQ(live_reader.page(p).pos_x_mm[0], 0.0f);
+            EXPECT_FLOAT_EQ(live_reader.page(p).energy_mev[0],
+                            make_test_event(p * kColumnarPageEvents).energy_mev);
+        }
+    }
+
+    // Write partial tail page and close
+    for (std::size_t i = 0; i < 137; ++i) {
+        ASSERT_TRUE(sink.write(make_test_event(kFirstWave + i)));
+    }
+    sink.close();
+
+    ColumnarReader final_reader(path.string());
+    ASSERT_TRUE(final_reader.is_open());
+    EXPECT_EQ(final_reader.num_pages(), 7U);
+    EXPECT_EQ(final_reader.total_events(), kFirstWave + 137U);
+    EXPECT_TRUE(final_reader.verify_all_pages());
+    final_reader.close();
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+TEST(ColumnarSinkTest, EndToEndPipelineSoAStagingConfigAndPrometheus) {
     const std::filesystem::path path = temp_file_path("pipeline");
     constexpr std::size_t kEvents = 20'000;
 
@@ -158,8 +241,16 @@ TEST(ColumnarSinkTest, EndToEndTelemetryPipeline) {
     cfg.output_path = path.string();
     cfg.simd_backend = SimdBackend::Auto;
     cfg.batch_size = 256;
+    cfg.use_soa_staging = true;
 
-    TelemetryPipeline pipeline(cfg);
+    const std::string cfg_json = to_json(cfg);
+    PipelineConfig parsed_cfg{};
+    ASSERT_TRUE(from_json(cfg_json, parsed_cfg));
+    EXPECT_EQ(parsed_cfg.output_path, cfg.output_path);
+    EXPECT_EQ(parsed_cfg.batch_size, cfg.batch_size);
+    EXPECT_EQ(parsed_cfg.use_soa_staging, cfg.use_soa_staging);
+
+    TelemetryPipeline pipeline(parsed_cfg);
     ASSERT_TRUE(pipeline.start()) << pipeline.sink_error();
 
     std::size_t expected_passed = 0;
@@ -173,6 +264,8 @@ TEST(ColumnarSinkTest, EndToEndTelemetryPipeline) {
     pipeline.stop();
 
     const PipelineStats stats = pipeline.stats();
+    EXPECT_EQ(stats.last_status, RingStatus::Ok);
+    EXPECT_EQ(stats.sink_errors, 0U);
     EXPECT_EQ(stats.submitted_events, kEvents);
     EXPECT_EQ(stats.consumed_events, kEvents);
     EXPECT_EQ(stats.passed_events, expected_passed);
@@ -182,6 +275,10 @@ TEST(ColumnarSinkTest, EndToEndTelemetryPipeline) {
     EXPECT_LE(stats.p90_ns, stats.p99_ns);
     EXPECT_LE(stats.p99_ns, stats.p99_9_ns);
     EXPECT_LE(stats.p99_9_ns, stats.max_ns);
+
+    const std::string prom = to_prometheus_text(stats);
+    EXPECT_NE(prom.find("chronoring_events_submitted_total 20000"), std::string::npos);
+    EXPECT_NE(prom.find("chronoring_latency_ns{quantile=\"0.99\"}"), std::string::npos);
 
     ColumnarReader reader(path.string());
     ASSERT_TRUE(reader.is_open()) << reader.last_error();
