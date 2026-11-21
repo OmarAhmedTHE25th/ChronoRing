@@ -21,6 +21,15 @@ enum QualityFlags : std::uint32_t {
     kFlagPileupWarn = 1u << 4
 };
 
+enum ColumnProjectionMask : std::uint16_t {
+    kColTimestamps      = 1u << 0,
+    kColDetectorChannel = 1u << 1,
+    kColKinematics      = 1u << 2,
+    kColPositions       = 1u << 3,
+    kColQualityTrigger  = 1u << 4,
+    kColAll             = 0x001Fu
+};
+
 struct alignas(kCacheLineSize) EventFrame {
     std::uint64_t timestamp_ns{0};
     std::uint64_t sequence_id{0};
