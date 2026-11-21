@@ -139,3 +139,29 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Run CLI smoke check
         run: .\build\Release\chronoring.exe --demo 25000
+
+  fuzz:
+    name: Linux Clang LibFuzzer Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+      - name: Configure Fuzzers
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCHRONORING_BUILD_TESTS=OFF \
+            -DCHRONORING_BUILD_BENCHMARKS=OFF \
+            -DCHRONORING_BUILD_FUZZERS=ON
+      - name: Build Fuzzers
+        run: cmake --build build-fuzz --parallel
+      - name: Run fuzz_rings & fuzz_columnar
+        run: |
+          ./build-fuzz/fuzz_rings fuzz/corpus/rings -max_total_time=30
+          ./build-fuzz/fuzz_columnar fuzz/corpus/columnar -max_total_time=30
