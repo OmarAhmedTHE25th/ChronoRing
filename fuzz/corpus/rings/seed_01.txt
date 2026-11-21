@@ -1,0 +1,1 @@
+ChronoRing seed input for SPSC/MPSC/LZ4/CRC32C fuzzer 0123456789abcdef
