@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ChronoRing VERSION 1.1.0 LANGUAGES CXX)
+project(ChronoRing VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ include(CMakePackageConfigHelpers)
 option(CHRONORING_BUILD_TESTS "Build ChronoRing unit tests" ON)
 option(CHRONORING_BUILD_BENCHMARKS "Build ChronoRing Google Benchmarks" ON)
 option(CHRONORING_BUILD_SHARED "Build chronoring_core as a shared library" OFF)
+option(CHRONORING_BUILD_FUZZERS "Build libFuzzer targets (requires Clang)" OFF)
 option(CHRONORING_ENABLE_ASAN_UBSAN "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(CHRONORING_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
@@ -142,6 +143,7 @@ if(CHRONORING_BUILD_TESTS)
         test_shm_ring
         test_simd_trigger
         test_columnar_sink
+        test_c_api
     )
 
     foreach(test_name IN LISTS CHRONORING_TESTS)
@@ -179,4 +181,13 @@ if(CHRONORING_BUILD_BENCHMARKS)
             $<BUILD_INTERFACE:chronoring_warnings>
             benchmark::benchmark
     )
+endif()
+
+if(CHRONORING_BUILD_FUZZERS)
+    foreach(fuzz_name IN ITEMS fuzz_rings fuzz_columnar)
+        add_executable(${fuzz_name} fuzz/${fuzz_name}.cpp)
+        target_link_libraries(${fuzz_name} PRIVATE chronoring_core)
+        target_compile_options(${fuzz_name} PRIVATE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+        target_link_options(${fuzz_name} PRIVATE -fsanitize=fuzzer,address,undefined)
+    endforeach()
 endif()
