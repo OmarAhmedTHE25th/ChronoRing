@@ -58,6 +58,7 @@ typedef struct chronoring_pipeline chronoring_pipeline_t;
 
 typedef struct chronoring_pipeline_config_t {
     const char* output_path;
+    const char* secondary_output_path;
     chronoring_trigger_config_t trigger;
     int consumer_cpu_core;
     size_t batch_size;
@@ -95,6 +96,7 @@ typedef struct chronoring_pipeline_stats_t {
 } chronoring_pipeline_stats_t;
 
 CHRONORING_API const char* chronoring_version(void);
+CHRONORING_API const char* chronoring_status_string(int status);
 
 CHRONORING_API chronoring_trigger_config_t chronoring_default_trigger_config(void);
 CHRONORING_API chronoring_pipeline_config_t chronoring_default_pipeline_config(void);
@@ -138,6 +140,7 @@ CHRONORING_API void chronoring_sink_close(chronoring_sink_t* sink);
 CHRONORING_API void chronoring_sink_destroy(chronoring_sink_t* sink);
 CHRONORING_API size_t chronoring_sink_pages_written(const chronoring_sink_t* sink);
 CHRONORING_API size_t chronoring_sink_events_written(const chronoring_sink_t* sink);
+CHRONORING_API size_t chronoring_sink_bytes_written(const chronoring_sink_t* sink);
 CHRONORING_API int chronoring_sink_last_status(const chronoring_sink_t* sink);
 
 CHRONORING_API chronoring_reader_t* chronoring_reader_open(const char* path);
@@ -177,10 +180,19 @@ CHRONORING_API int chronoring_pipeline_start(chronoring_pipeline_t* pipeline);
 CHRONORING_API int chronoring_pipeline_submit(
     chronoring_pipeline_t* pipeline,
     const chronoring_event_frame_t* frame);
+CHRONORING_API int chronoring_pipeline_submit_wait(
+    chronoring_pipeline_t* pipeline,
+    const chronoring_event_frame_t* frame);
 CHRONORING_API size_t chronoring_pipeline_submit_batch(
     chronoring_pipeline_t* pipeline,
     const chronoring_event_frame_t* frames,
     size_t count);
+CHRONORING_API int chronoring_pipeline_is_backpressured(
+    const chronoring_pipeline_t* pipeline);
+CHRONORING_API double chronoring_pipeline_ring_fill_ratio(
+    const chronoring_pipeline_t* pipeline);
+CHRONORING_API int chronoring_pipeline_last_status(
+    const chronoring_pipeline_t* pipeline);
 CHRONORING_API void chronoring_pipeline_stop(chronoring_pipeline_t* pipeline);
 CHRONORING_API void chronoring_pipeline_stats(
     const chronoring_pipeline_t* pipeline,
