@@ -63,6 +63,10 @@ const char* chronoring_version(void) {
     return CHRONORING_VERSION_STRING;
 }
 
+const char* chronoring_status_string(int status) {
+    return chronoring::status_string(static_cast<chronoring::RingStatus>(status)).data();
+}
+
 chronoring_trigger_config_t chronoring_default_trigger_config(void) {
     const chronoring::TriggerConfig def{};
     chronoring_trigger_config_t c{};
@@ -164,6 +168,7 @@ size_t chronoring_spsc_size(const chronoring_spsc_t* ring) {
 chronoring_pipeline_config_t chronoring_default_pipeline_config(void) {
     chronoring_pipeline_config_t cfg{};
     cfg.output_path = nullptr;
+    cfg.secondary_output_path = nullptr;
     cfg.trigger = chronoring_default_trigger_config();
     cfg.consumer_cpu_core = -1;
     cfg.batch_size = 256;
@@ -242,6 +247,10 @@ size_t chronoring_sink_pages_written(const chronoring_sink_t* sink) {
 
 size_t chronoring_sink_events_written(const chronoring_sink_t* sink) {
     return (sink != nullptr) ? sink->sink.events_written() : 0;
+}
+
+size_t chronoring_sink_bytes_written(const chronoring_sink_t* sink) {
+    return (sink != nullptr) ? sink->sink.bytes_written() : 0;
 }
 
 int chronoring_sink_last_status(const chronoring_sink_t* sink) {
@@ -392,6 +401,9 @@ chronoring_pipeline_t* chronoring_pipeline_create(
         if (cfg->output_path != nullptr) {
             cpp_cfg.output_path = cfg->output_path;
         }
+        if (cfg->secondary_output_path != nullptr) {
+            cpp_cfg.secondary_output_path = cfg->secondary_output_path;
+        }
         cpp_cfg.trigger = to_cpp_trigger(&cfg->trigger);
         cpp_cfg.consumer_cpu_core = cfg->consumer_cpu_core;
         if (cfg->batch_size > 0) {
@@ -425,6 +437,31 @@ int chronoring_pipeline_submit(chronoring_pipeline_t* pipeline,
     chronoring::EventFrame aligned{};
     std::memcpy(static_cast<void*>(&aligned), frame, sizeof(chronoring::EventFrame));
     return pipeline->pipeline.submit(aligned) ? 1 : 0;
+}
+
+int chronoring_pipeline_submit_wait(chronoring_pipeline_t* pipeline,
+                                    const chronoring_event_frame_t* frame) {
+    if (pipeline == nullptr || frame == nullptr) {
+        return 0;
+    }
+    chronoring::EventFrame aligned{};
+    std::memcpy(static_cast<void*>(&aligned), frame, sizeof(chronoring::EventFrame));
+    pipeline->pipeline.submit_wait(aligned);
+    return 1;
+}
+
+int chronoring_pipeline_is_backpressured(const chronoring_pipeline_t* pipeline) {
+    return (pipeline != nullptr && pipeline->pipeline.is_backpressured()) ? 1 : 0;
+}
+
+double chronoring_pipeline_ring_fill_ratio(const chronoring_pipeline_t* pipeline) {
+    return (pipeline != nullptr) ? pipeline->pipeline.ring_fill_ratio() : 0.0;
+}
+
+int chronoring_pipeline_last_status(const chronoring_pipeline_t* pipeline) {
+    return (pipeline != nullptr)
+               ? static_cast<int>(pipeline->pipeline.last_status())
+               : static_cast<int>(chronoring::RingStatus::InvalidArgument);
 }
 
 size_t chronoring_pipeline_submit_batch(chronoring_pipeline_t* pipeline,
