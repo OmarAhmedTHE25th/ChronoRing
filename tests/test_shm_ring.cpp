@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,8 +21,9 @@ namespace chronoring::test {
 namespace {
 
 std::string unique_shm_name(const char* suffix) {
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    return std::string("chronoring_test_") + suffix + "_" + std::to_string(now);
+    const auto now = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    return std::string("cr_") + suffix + "_" + std::to_string(now % 1'000'000ULL);
 }
 
 EventFrame make_ipc_frame(std::uint64_t seq) noexcept {
@@ -39,48 +41,87 @@ EventFrame make_ipc_frame(std::uint64_t seq) noexcept {
 } // namespace
 
 TEST(ShmRingTest, OpenNonExistentFailsGracefully) {
-    const std::string name = unique_shm_name("missing");
+    const std::string name = unique_shm_name("miss");
     (void)ShmRingBuffer::unlink(name);
     ShmRingBuffer ring(name, ShmMode::Open);
     EXPECT_FALSE(ring.is_open());
+    EXPECT_NE(ring.last_status(), RingStatus::Ok);
     EXPECT_FALSE(ring.last_error().empty());
 }
 
-TEST(ShmRingTest, DualMappingWrapAroundAndClose) {
+TEST(ShmRingTest, DualMappingStatusReservePeekAndScopeGuard) {
     const std::string name = unique_shm_name("dual");
-    ShmRingBuffer producer(name, ShmMode::Create, 64, false);
-    ASSERT_TRUE(producer.is_open()) << producer.last_error();
+    {
+        ShmScopeGuard guard(name);
+        ShmRingBuffer producer(name, ShmMode::Create, 64, false);
+        ASSERT_TRUE(producer.is_open()) << producer.last_error();
 
-    ShmRingBuffer consumer(name, ShmMode::Open);
-    ASSERT_TRUE(consumer.is_open()) << consumer.last_error();
-    EXPECT_EQ(consumer.capacity(), 64U);
+        ShmRingBuffer consumer(name, ShmMode::Open);
+        ASSERT_TRUE(consumer.is_open()) << consumer.last_error();
+        EXPECT_EQ(consumer.capacity(), 64U);
 
-    for (std::uint64_t round = 0; round < 10; ++round) {
-        std::vector<EventFrame> batch(32);
-        for (std::size_t i = 0; i < batch.size(); ++i) {
-            batch[i] = make_ipc_frame(round * 32ULL + i);
+        // Zero-copy reserve/commit and peek/consume
+        EventFrame* reserved = producer.try_reserve_push();
+        ASSERT_NE(reserved, nullptr);
+        *reserved = make_ipc_frame(999);
+        producer.commit_push();
+
+        const EventFrame* peeked = consumer.try_peek();
+        ASSERT_NE(peeked, nullptr);
+        EXPECT_EQ(peeked->sequence_id, 999U);
+        consumer.consume_pop();
+
+        EventFrame dummy{};
+        EXPECT_EQ(consumer.try_pop_status(dummy), RingStatus::Empty);
+
+        for (std::uint64_t round = 0; round < 10; ++round) {
+            std::vector<EventFrame> batch(32);
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                batch[i] = make_ipc_frame(round * 32ULL + i);
+            }
+            EXPECT_EQ(producer.try_push_batch(std::span<const EventFrame>(batch)), 32U);
+
+            std::vector<EventFrame> out(32);
+            EXPECT_EQ(consumer.try_pop_batch(std::span<EventFrame>(out)), 32U);
+            for (std::size_t i = 0; i < out.size(); ++i) {
+                EXPECT_EQ(out[i].sequence_id, round * 32ULL + i);
+                EXPECT_FLOAT_EQ(out[i].energy_mev, batch[i].energy_mev);
+            }
         }
-        EXPECT_EQ(producer.try_push_batch(batch.data(), batch.size()), 32U);
 
-        std::vector<EventFrame> out(32);
-        EXPECT_EQ(consumer.try_pop_batch(out.data(), out.size()), 32U);
-        for (std::size_t i = 0; i < out.size(); ++i) {
-            EXPECT_EQ(out[i].sequence_id, round * 32ULL + i);
-            EXPECT_FLOAT_EQ(out[i].energy_mev, batch[i].energy_mev);
-        }
+        EXPECT_FALSE(consumer.is_closed());
+        producer.close();
+        EXPECT_TRUE(consumer.is_closed());
+        EXPECT_EQ(producer.try_push_status(dummy), RingStatus::Closed);
+        EXPECT_EQ(consumer.try_pop_status(dummy), RingStatus::Closed);
     }
 
-    EXPECT_FALSE(consumer.is_closed());
-    producer.close();
-    EXPECT_TRUE(consumer.is_closed());
+#ifndef _WIN32
+    // Guard should have unlinked the POSIX SHM object on scope exit
+    ShmRingBuffer reopen(name, ShmMode::Open);
+    EXPECT_FALSE(reopen.is_open());
+#endif
+}
 
-    consumer.unmap();
-    producer.unmap();
-    EXPECT_TRUE(ShmRingBuffer::unlink(name));
+TEST(ShmRingTest, NameCollisionOverwriteResetsState) {
+    const std::string name = unique_shm_name("coll");
+    ShmScopeGuard guard(name);
+    {
+        ShmRingBuffer first(name, ShmMode::Create, 32, false);
+        ASSERT_TRUE(first.is_open());
+        EXPECT_TRUE(first.try_push(make_ipc_frame(1)));
+        EXPECT_EQ(first.size_approx(), 1U);
+    }
+    // Recreating with the same name must produce a fresh empty ring
+    ShmRingBuffer second(name, ShmMode::Create, 64, false);
+    ASSERT_TRUE(second.is_open());
+    EXPECT_EQ(second.capacity(), 64U);
+    EXPECT_TRUE(second.empty());
 }
 
 TEST(ShmRingTest, ConcurrentThreadsAcrossMappings) {
-    const std::string name = unique_shm_name("threads");
+    const std::string name = unique_shm_name("thrd");
+    ShmScopeGuard guard(name);
     constexpr std::size_t kCount = 50'000;
 
     ShmRingBuffer producer(name, ShmMode::Create, 1024, false);
@@ -118,15 +159,12 @@ TEST(ShmRingTest, ConcurrentThreadsAcrossMappings) {
     prod_th.join();
     cons_th.join();
     EXPECT_EQ(received, kCount);
-
-    consumer.unmap();
-    producer.unmap();
-    (void)ShmRingBuffer::unlink(name);
 }
 
 #ifndef _WIN32
 TEST(ShmRingTest, CrossProcessForkIpc) {
     const std::string name = unique_shm_name("fork");
+    ShmScopeGuard guard(name);
     constexpr std::size_t kCount = 25'000;
 
     ShmRingBuffer producer(name, ShmMode::Create, 1024, false);
@@ -171,9 +209,6 @@ TEST(ShmRingTest, CrossProcessForkIpc) {
     ASSERT_EQ(::waitpid(pid, &status, 0), pid);
     ASSERT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 0);
-
-    producer.unmap();
-    (void)ShmRingBuffer::unlink(name);
 }
 #endif
 

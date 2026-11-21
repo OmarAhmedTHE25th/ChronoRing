@@ -59,6 +59,22 @@ std::string ShmRingBuffer::normalize_shm_name(const std::string& name) {
     if (clean.size() == 1) {
         clean += "chronoring_default";
     }
+#ifdef __APPLE__
+    // macOS limits POSIX shm_open names to PSHMNAMLEN (31 characters).
+    if (clean.size() > 28) {
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (char c : clean) {
+            hash ^= static_cast<std::uint8_t>(c);
+            hash *= 1099511628211ULL;
+        }
+        static constexpr char kHex[] = "0123456789abcdef";
+        std::string compact = "/cr_";
+        for (int i = 0; i < 16; ++i) {
+            compact.push_back(kHex[(hash >> (i * 4)) & 0xFU]);
+        }
+        clean = std::move(compact);
+    }
+#endif
 #endif
     return clean;
 }
@@ -69,7 +85,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
       normalized_name_(normalize_shm_name(name_)),
       unlink_on_destroy_(unlink_on_destroy) {
     if (mode == ShmMode::Create && !is_power_of_two(capacity)) {
+        last_status_ = RingStatus::InvalidArgument;
         last_error_ = "ShmRingBuffer capacity must be a power of 2 and >= 2";
+        emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_, capacity);
         return;
     }
 
@@ -84,13 +102,17 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
         HANDLE handle = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                            size_high, size_low, normalized_name_.c_str());
         if (handle == nullptr) {
+            last_status_ = RingStatus::MappingError;
             last_error_ = "CreateFileMappingA failed";
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         void* view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, total_bytes);
         if (view == nullptr) {
             CloseHandle(handle);
+            last_status_ = RingStatus::MappingError;
             last_error_ = "MapViewOfFile failed";
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         std::memset(view, 0, total_bytes);
@@ -110,17 +132,22 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
                                                sizeof(ShmRingHeader));
         capacity_ = capacity;
         mask_ = capacity - 1;
+        last_status_ = RingStatus::Ok;
     } else {
         HANDLE handle =
             OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, normalized_name_.c_str());
         if (handle == nullptr) {
+            last_status_ = RingStatus::MappingError;
             last_error_ = "OpenFileMappingA failed";
+            emit_log(LogLevel::Warn, last_status_, "shm_ring", last_error_);
             return;
         }
         void* view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0);
         if (view == nullptr) {
             CloseHandle(handle);
+            last_status_ = RingStatus::MappingError;
             last_error_ = "MapViewOfFile (Open) failed";
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         auto* hdr = static_cast<ShmRingHeader*>(view);
@@ -130,7 +157,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
             if (std::chrono::steady_clock::now() >= deadline) {
                 UnmapViewOfFile(view);
                 CloseHandle(handle);
+                last_status_ = RingStatus::Timeout;
                 last_error_ = "Timed out waiting for shared-memory header ready_flag";
+                emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
                 return;
             }
             std::this_thread::yield();
@@ -140,7 +169,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
             !is_power_of_two(static_cast<std::size_t>(hdr->capacity))) {
             UnmapViewOfFile(view);
             CloseHandle(handle);
+            last_status_ = RingStatus::InvalidArgument;
             last_error_ = "Invalid shared-memory ring header";
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         const std::size_t cap = static_cast<std::size_t>(hdr->capacity);
@@ -153,6 +184,11 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
                                                sizeof(ShmRingHeader));
         capacity_ = cap;
         mask_ = cap - 1;
+        cached_local_head_ = header_->head.load(std::memory_order_acquire);
+        cached_local_tail_ = header_->tail.load(std::memory_order_acquire);
+        cached_head_ = cached_local_head_;
+        cached_tail_ = cached_local_tail_;
+        last_status_ = RingStatus::Ok;
     }
 #else
     if (mode == ShmMode::Create) {
@@ -160,7 +196,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
         const int fd =
             ::shm_open(normalized_name_.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
         if (fd < 0) {
+            last_status_ = RingStatus::MappingError;
             last_error_ = std::string("shm_open(Create) failed: ") + std::strerror(errno);
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         const std::size_t total_bytes =
@@ -169,7 +207,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
             const int err = errno;
             ::close(fd);
             ::shm_unlink(normalized_name_.c_str());
+            last_status_ = RingStatus::IoError;
             last_error_ = std::string("ftruncate failed: ") + std::strerror(err);
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         void* view = ::mmap(nullptr, total_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -177,7 +217,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
             const int err = errno;
             ::close(fd);
             ::shm_unlink(normalized_name_.c_str());
+            last_status_ = RingStatus::MappingError;
             last_error_ = std::string("mmap(Create) failed: ") + std::strerror(err);
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         std::memset(view, 0, total_bytes);
@@ -197,10 +239,13 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
                                                sizeof(ShmRingHeader));
         capacity_ = capacity;
         mask_ = capacity - 1;
+        last_status_ = RingStatus::Ok;
     } else {
         const int fd = ::shm_open(normalized_name_.c_str(), O_RDWR, 0600);
         if (fd < 0) {
+            last_status_ = RingStatus::MappingError;
             last_error_ = std::string("shm_open(Open) failed: ") + std::strerror(errno);
+            emit_log(LogLevel::Warn, last_status_, "shm_ring", last_error_);
             return;
         }
         void* hdr_view =
@@ -208,7 +253,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
         if (hdr_view == MAP_FAILED) {
             const int err = errno;
             ::close(fd);
+            last_status_ = RingStatus::MappingError;
             last_error_ = std::string("mmap(Header) failed: ") + std::strerror(err);
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         auto* probe_hdr = static_cast<ShmRingHeader*>(hdr_view);
@@ -218,7 +265,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
             if (std::chrono::steady_clock::now() >= deadline) {
                 ::munmap(hdr_view, sizeof(ShmRingHeader));
                 ::close(fd);
+                last_status_ = RingStatus::Timeout;
                 last_error_ = "Timed out waiting for shared-memory header ready_flag";
+                emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
                 return;
             }
             std::this_thread::yield();
@@ -232,7 +281,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
         if (magic != kShmRingMagic || version != kShmRingVersion ||
             elem_size != sizeof(EventFrame) || !is_power_of_two(cap)) {
             ::close(fd);
+            last_status_ = RingStatus::InvalidArgument;
             last_error_ = "Invalid shared-memory ring header";
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
 
@@ -241,7 +292,9 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
         if (view == MAP_FAILED) {
             const int err = errno;
             ::close(fd);
+            last_status_ = RingStatus::MappingError;
             last_error_ = std::string("mmap(Open) failed: ") + std::strerror(err);
+            emit_log(LogLevel::Error, last_status_, "shm_ring", last_error_);
             return;
         }
         shm_fd_ = fd;
@@ -252,6 +305,11 @@ ShmRingBuffer::ShmRingBuffer(std::string name, ShmMode mode, std::size_t capacit
                                                sizeof(ShmRingHeader));
         capacity_ = cap;
         mask_ = cap - 1;
+        cached_local_head_ = header_->head.load(std::memory_order_acquire);
+        cached_local_tail_ = header_->tail.load(std::memory_order_acquire);
+        cached_head_ = cached_local_head_;
+        cached_tail_ = cached_local_tail_;
+        last_status_ = RingStatus::Ok;
     }
 #endif
 }
@@ -275,7 +333,10 @@ ShmRingBuffer::ShmRingBuffer(ShmRingBuffer&& other) noexcept
       slots_(other.slots_),
       cached_tail_(other.cached_tail_),
       cached_head_(other.cached_head_),
+      cached_local_head_(other.cached_local_head_),
+      cached_local_tail_(other.cached_local_tail_),
       last_error_(std::move(other.last_error_)),
+      last_status_(other.last_status_),
 #ifdef _WIN32
       file_mapping_handle_(other.file_mapping_handle_)
 #else
@@ -291,6 +352,8 @@ ShmRingBuffer::ShmRingBuffer(ShmRingBuffer&& other) noexcept
     other.slots_ = nullptr;
     other.cached_tail_ = 0;
     other.cached_head_ = 0;
+    other.cached_local_head_ = 0;
+    other.cached_local_tail_ = 0;
 #ifdef _WIN32
     other.file_mapping_handle_ = nullptr;
 #else
@@ -315,7 +378,10 @@ ShmRingBuffer& ShmRingBuffer::operator=(ShmRingBuffer&& other) noexcept {
         slots_ = other.slots_;
         cached_tail_ = other.cached_tail_;
         cached_head_ = other.cached_head_;
+        cached_local_head_ = other.cached_local_head_;
+        cached_local_tail_ = other.cached_local_tail_;
         last_error_ = std::move(other.last_error_);
+        last_status_ = other.last_status_;
 #ifdef _WIN32
         file_mapping_handle_ = other.file_mapping_handle_;
         other.file_mapping_handle_ = nullptr;
@@ -332,6 +398,8 @@ ShmRingBuffer& ShmRingBuffer::operator=(ShmRingBuffer&& other) noexcept {
         other.slots_ = nullptr;
         other.cached_tail_ = 0;
         other.cached_head_ = 0;
+        other.cached_local_head_ = 0;
+        other.cached_local_tail_ = 0;
     }
     return *this;
 }
@@ -374,36 +442,90 @@ bool ShmRingBuffer::is_closed() const noexcept {
     return header_->closed_flag.load(std::memory_order_acquire) != 0;
 }
 
-bool ShmRingBuffer::try_push(const EventFrame& frame) noexcept {
+RingStatus ShmRingBuffer::try_push_status(const EventFrame& frame) noexcept {
     if (header_ == nullptr) {
+        return RingStatus::MappingError;
+    }
+    if (is_closed()) {
+        return RingStatus::Closed;
+    }
+    return try_push(frame) ? RingStatus::Ok : RingStatus::Full;
+}
+
+RingStatus ShmRingBuffer::try_pop_status(EventFrame& out) noexcept {
+    if (header_ == nullptr) {
+        return RingStatus::MappingError;
+    }
+    if (try_pop(out)) {
+        return RingStatus::Ok;
+    }
+    return is_closed() ? RingStatus::Closed : RingStatus::Empty;
+}
+
+bool ShmRingBuffer::try_push(const EventFrame& frame) noexcept {
+    EventFrame* slot = try_reserve_push();
+    if (slot == nullptr) {
         return false;
     }
-    const std::uint64_t head = header_->head.load(std::memory_order_relaxed);
-    if ((head - cached_tail_) >= capacity_) {
-        cached_tail_ = header_->tail.load(std::memory_order_acquire);
-        if ((head - cached_tail_) >= capacity_) {
-            return false;
-        }
-    }
-    slots_[static_cast<std::size_t>(head) & mask_] = frame;
-    header_->head.store(head + 1, std::memory_order_release);
+    *slot = frame;
+    commit_push();
     return true;
 }
 
 bool ShmRingBuffer::try_pop(EventFrame& out) noexcept {
-    if (header_ == nullptr) {
+    const EventFrame* slot = try_peek();
+    if (slot == nullptr) {
         return false;
     }
-    const std::uint64_t tail = header_->tail.load(std::memory_order_relaxed);
+    out = *slot;
+    consume_pop();
+    return true;
+}
+
+EventFrame* ShmRingBuffer::try_reserve_push() noexcept {
+    if (header_ == nullptr) {
+        return nullptr;
+    }
+    const std::uint64_t head = cached_local_head_;
+    if ((head - cached_tail_) >= capacity_) {
+        cached_tail_ = header_->tail.load(std::memory_order_acquire);
+        if ((head - cached_tail_) >= capacity_) {
+            return nullptr;
+        }
+    }
+    return &slots_[static_cast<std::size_t>(head) & mask_];
+}
+
+void ShmRingBuffer::commit_push() noexcept {
+    if (header_ == nullptr) {
+        return;
+    }
+    const std::uint64_t next_head = cached_local_head_ + 1;
+    cached_local_head_ = next_head;
+    header_->head.store(next_head, std::memory_order_release);
+}
+
+const EventFrame* ShmRingBuffer::try_peek() noexcept {
+    if (header_ == nullptr) {
+        return nullptr;
+    }
+    const std::uint64_t tail = cached_local_tail_;
     if (cached_head_ == tail) {
         cached_head_ = header_->head.load(std::memory_order_acquire);
         if (cached_head_ == tail) {
-            return false;
+            return nullptr;
         }
     }
-    out = slots_[static_cast<std::size_t>(tail) & mask_];
-    header_->tail.store(tail + 1, std::memory_order_release);
-    return true;
+    return &slots_[static_cast<std::size_t>(tail) & mask_];
+}
+
+void ShmRingBuffer::consume_pop() noexcept {
+    if (header_ == nullptr) {
+        return;
+    }
+    const std::uint64_t next_tail = cached_local_tail_ + 1;
+    cached_local_tail_ = next_tail;
+    header_->tail.store(next_tail, std::memory_order_release);
 }
 
 std::size_t ShmRingBuffer::try_push_batch(const EventFrame* frames,
@@ -411,7 +533,7 @@ std::size_t ShmRingBuffer::try_push_batch(const EventFrame* frames,
     if (header_ == nullptr || frames == nullptr || count == 0) {
         return 0;
     }
-    const std::uint64_t head = header_->head.load(std::memory_order_relaxed);
+    const std::uint64_t head = cached_local_head_;
     std::uint64_t avail = capacity_ - (head - cached_tail_);
     if (avail < count) {
         cached_tail_ = header_->tail.load(std::memory_order_acquire);
@@ -425,7 +547,8 @@ std::size_t ShmRingBuffer::try_push_batch(const EventFrame* frames,
     for (std::size_t i = 0; i < to_push; ++i) {
         slots_[static_cast<std::size_t>(head + i) & mask_] = frames[i];
     }
-    header_->head.store(head + to_push, std::memory_order_release);
+    cached_local_head_ = head + to_push;
+    header_->head.store(cached_local_head_, std::memory_order_release);
     return to_push;
 }
 
@@ -434,7 +557,7 @@ std::size_t ShmRingBuffer::try_pop_batch(EventFrame* out,
     if (header_ == nullptr || out == nullptr || max_count == 0) {
         return 0;
     }
-    const std::uint64_t tail = header_->tail.load(std::memory_order_relaxed);
+    const std::uint64_t tail = cached_local_tail_;
     std::uint64_t avail = cached_head_ - tail;
     if (avail < max_count) {
         cached_head_ = header_->head.load(std::memory_order_acquire);
@@ -448,7 +571,8 @@ std::size_t ShmRingBuffer::try_pop_batch(EventFrame* out,
     for (std::size_t i = 0; i < to_pop; ++i) {
         out[i] = slots_[static_cast<std::size_t>(tail + i) & mask_];
     }
-    header_->tail.store(tail + to_pop, std::memory_order_release);
+    cached_local_tail_ = tail + to_pop;
+    header_->tail.store(cached_local_tail_, std::memory_order_release);
     return to_pop;
 }
 

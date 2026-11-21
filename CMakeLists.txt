@@ -22,7 +22,7 @@ find_package(Threads REQUIRED)
 
 add_library(chronoring_warnings INTERFACE)
 if(MSVC)
-    target_compile_options(chronoring_warnings INTERFACE /W4 /WX /permissive- /EHsc)
+    target_compile_options(chronoring_warnings INTERFACE /W4 /WX /wd4324 /permissive- /EHsc)
     target_compile_definitions(chronoring_warnings INTERFACE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(chronoring_warnings INTERFACE -Wall -Wextra -Werror -Wpedantic)
