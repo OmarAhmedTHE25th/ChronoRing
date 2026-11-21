@@ -40,7 +40,8 @@ class ColumnarSink {
 public:
     ColumnarSink() noexcept = default;
     explicit ColumnarSink(std::string path, std::size_t initial_page_capacity = 64,
-                          std::uint16_t projection_mask = kColAll);
+                          std::uint16_t projection_mask = kColAll,
+                          bool enable_compression = false);
     ~ColumnarSink();
 
     ColumnarSink(const ColumnarSink&) = delete;
@@ -49,7 +50,8 @@ public:
     ColumnarSink& operator=(ColumnarSink&& other) noexcept;
 
     [[nodiscard]] bool open(std::string path, std::size_t initial_page_capacity = 64,
-                            std::uint16_t projection_mask = kColAll);
+                            std::uint16_t projection_mask = kColAll,
+                            bool enable_compression = false);
     void close() noexcept;
     [[nodiscard]] bool flush() noexcept;
 
@@ -62,7 +64,9 @@ public:
     [[nodiscard]] bool is_open() const noexcept { return pages_ != nullptr; }
     [[nodiscard]] std::size_t pages_written() const noexcept { return committed_pages_; }
     [[nodiscard]] std::size_t events_written() const noexcept { return total_events_; }
+    [[nodiscard]] std::size_t bytes_written() const noexcept { return committed_bytes_; }
     [[nodiscard]] std::uint16_t projection_mask() const noexcept { return projection_mask_; }
+    [[nodiscard]] bool compression_enabled() const noexcept { return enable_compression_; }
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
     [[nodiscard]] RingStatus last_status() const noexcept { return last_status_; }
@@ -78,11 +82,14 @@ private:
     std::string last_error_{};
     RingStatus last_status_{RingStatus::Ok};
     std::uint16_t projection_mask_{kColAll};
+    bool enable_compression_{false};
 
     std::unique_ptr<ColumnarPage> staging_page_{};
+    std::vector<std::uint8_t> compress_scratch_{};
     ColumnarPage* pages_{nullptr};
     std::size_t mapped_page_capacity_{0};
     std::size_t committed_pages_{0};
+    std::size_t committed_bytes_{0};
     std::size_t active_page_count_{0};
     std::size_t total_events_{0};
 
@@ -125,7 +132,15 @@ public:
     [[nodiscard]] bool is_open() const noexcept { return mapped_base_ != nullptr; }
     [[nodiscard]] std::size_t num_pages() const noexcept { return num_pages_; }
     [[nodiscard]] std::size_t total_events() const noexcept;
-    [[nodiscard]] const ColumnarPage& page(std::size_t index) const noexcept { return pages_[index]; }
+    [[nodiscard]] const ColumnarPageHeader& page_header(std::size_t index) const noexcept {
+        return *reinterpret_cast<const ColumnarPageHeader*>(
+            static_cast<const std::uint8_t*>(mapped_base_) + page_offsets_[index]);
+    }
+    [[nodiscard]] const ColumnarPage& page(std::size_t index) const noexcept {
+        return *reinterpret_cast<const ColumnarPage*>(
+            static_cast<const std::uint8_t*>(mapped_base_) + page_offsets_[index]);
+    }
+    [[nodiscard]] bool read_page(std::size_t index, ColumnarPage& out) const noexcept;
     [[nodiscard]] bool verify_all_pages(std::size_t* corrupted_page_index = nullptr) const noexcept;
     [[nodiscard]] const std::string& last_error() const noexcept { return last_error_; }
     [[nodiscard]] RingStatus last_status() const noexcept { return last_status_; }
@@ -141,11 +156,14 @@ public:
         std::uint64_t* out_total_scanned = nullptr) const noexcept;
 
 private:
+    [[nodiscard]] bool verify_page_at(std::size_t index) const noexcept;
+
     std::string path_{};
     std::string last_error_{};
     RingStatus last_status_{RingStatus::Ok};
     void* mapped_base_{nullptr};
     const ColumnarPage* pages_{nullptr};
+    std::vector<std::size_t> page_offsets_{};
     std::size_t file_bytes_{0};
     std::size_t num_pages_{0};
     bool size_aligned_{true};
