@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <new>
 #include <string_view>
 #include <type_traits>
