@@ -1,8 +1,8 @@
 # ChronoRing
 
-**Lock-Free Ring-Buffer Telemetry & SIMD Trigger Engine** (`C++20`, v1.1.0)
+**Lock-Free Ring-Buffer Telemetry & SIMD Trigger Engine** (`C++20`, v1.2.0)
 
-ChronoRing is a standalone, zero-allocation C++20 systems engineering library and pipeline designed for ultra-low-latency high-energy physics / detector telemetry ingestion, vectorized SIMD trigger filtering, and zero-copy memory-mapped columnar persistence with hardware-accelerated CRC32C verification.
+ChronoRing is a standalone, zero-allocation C++20 systems engineering library and pipeline designed for ultra-low-latency high-energy physics / detector telemetry ingestion, vectorized SIMD trigger filtering, and zero-copy memory-mapped columnar persistence with optional zero-allocation LZ4 page compression and hardware-accelerated CRC32C verification.
 
 ---
 
@@ -15,8 +15,9 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
   ┌──────────────────────────────────────────────────────────┐
   │  64B Cache-Line Aligned EventFrame Ring Buffer           │
   │  - Shadow index caching, span batching, reserve/commit   │
+  │  - Adaptive batching & explicit back-pressure signals    │
   └──────────────────────────────────────────────────────────┘
-        │  (Batch pop on optional core-pinned consumer thread)
+        │  (Adaptive batch pop on NUMA/core-pinned consumer thread)
         ▼
   ┌──────────────────────────────────────────────────────────┐
   │  SIMD Trigger Engine (AVX2 / SSE4.2 / NEON / Scalar)     │
@@ -29,9 +30,9 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
   ┌──────────────────────────┐   ┌───────────────────────────┐
   │ Zero-Copy ColumnarSink   │   │ Lock-Free HDR Latency     │
   │ - In-memory staging page │   │ Histogram (p50/p99/p99.9) │
-  │ - Column projection      │   │ + Prometheus export       │
-  │ - Hardware CRC32C        │   └───────────────────────────┘
-  │ - mmap Persistence       │
+  │ - Optional LZ4 page comp │   │ + Reject-reason counters  │
+  │ - Durable dual-write     │   │ + Prometheus export       │
+  │ - Hardware CRC32C + mmap │   └───────────────────────────┘
   └──────────────────────────┘
 ```
 
@@ -46,10 +47,13 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `include/chronoring/mpsc_ring.hpp` | Vyukov lock-free `MpscRingBuffer` with adaptive spin/yield/`std::atomic::wait` (`push_wait`/`pop_wait`). |
 | `include/chronoring/shm_ring.hpp` | Cross-process shared-memory ring (`shm_open`/`mmap` on POSIX, `CreateFileMapping` on Win32) + `ShmScopeGuard`. |
 | `include/chronoring/simd_trigger.hpp` | AVX2, SSE4.2, NEON, and scalar kernels, `diagnose_reject_reasons`, custom predicate hooks, and JSON config serialization. |
-| `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (with column projection) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
+| `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (projection + optional LZ4 compression) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
+| `include/chronoring/lz4_codec.hpp` | Zero-allocation LZ4-format block encoder/decoder using a fixed 16 KiB stack hash table. |
+| `include/chronoring/numa.hpp` | Portable CPU topology queries and core-pinning / NUMA policy helpers. |
 | `include/chronoring/latency_histogram.hpp` | Lock-free logarithmic HDR histogram (`< 0.8%` bucket width, `0 ns` to `> 270 s`). |
-| `include/chronoring/pipeline.hpp` | End-to-end `TelemetryPipeline`, error propagation, JSON config serialization, and Prometheus exposition exporter. |
-| `include/chronoring/c_api.h` | Pure C99/C11 ABI (`chronoring_filter_events`, `chronoring_crc32c`, `chronoring_spsc_*`) for FFI / Python / Rust bindings. |
+| `include/chronoring/pipeline.hpp` | End-to-end `TelemetryPipeline`, adaptive batching, back-pressure signals, durable dual-write, JSON config, and Prometheus exporter. |
+| `include/chronoring/c_api.h` | Pure C99/C11 ABI (`chronoring_spsc_*`, `chronoring_sink_*`, `chronoring_reader_*`, `chronoring_shm_*`, `chronoring_pipeline_*`). |
+| `python/chronoring/__init__.py` | Thin zero-dependency `ctypes` Python bindings built atop `libchronoring_core`. |
 
 ---
 
@@ -63,6 +67,12 @@ Each `.crng` file is an array of fixed `57,408`-byte, 64-byte aligned `ColumnarP
 | `64..16447` | `16,384 B` | `timestamp_ns[1024]`, `sequence_id[1024]` (`uint64_t`) |
 | `16448..53311` | `36,864 B` | `detector_id`, `channel_id`, `energy_mev`, `timing_ps`, `pos_x_mm`, `pos_y_mm`, `pos_z_mm`, `pileup_score`, `quality_flags` (9 x 4 KB) |
 | `53312..57407` | `4,096 B` | `multiplicity[1024]`, `trigger_mask[1024]` (`uint16_t`) |
+
+### Optional Zero-Allocation LZ4 Compression
+
+- **How to enable**: Pass `enable_compression = true` to `ColumnarSink::open(...)`, set `PipelineConfig::enable_compression = true`, or pass `enable_compression = 1` in the C/Python APIs.
+- **On-disk flag & framing**: Sets `kPageFlagLz4` (`1 << 8`) in `ColumnarPageHeader::flags` and stores the compressed payload length in `header.compressed_bytes` (bytes `56..59`). `data_crc32c` is computed over the compressed payload, and `ColumnarSink::close()` truncates the file to the exact compressed byte count.
+- **Performance impact**: Uses a fixed 16 KiB stack hash table and a pre-allocated scratch buffer sized once in `open()` — **zero heap allocations** on the hot path. Structured detector telemetry typically compresses by **3x–10x** on disk while keeping `ColumnarReader::read_page()` and `replay_filtered()` transparent.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for detailed architecture notes.
 
@@ -91,9 +101,14 @@ cmake --install build --prefix /usr/local
 ```
 
 Optional CMake flags:
-- `-DCHRONORING_BUILD_SHARED=ON` — Build `libchronoring_core.so` / `chronoring_core.dll`.
+- `-DCHRONORING_BUILD_SHARED=ON` — Build `libchronoring_core.so` / `chronoring_core.dll` (required for Python bindings).
+- `-DCHRONORING_BUILD_FUZZERS=ON` — Build `fuzz_rings` and `fuzz_columnar` libFuzzer targets (Clang).
 - `-DCHRONORING_ENABLE_ASAN_UBSAN=ON` — Build with AddressSanitizer + UndefinedBehaviorSanitizer.
 - `-DCHRONORING_ENABLE_TSAN=ON` — Build with ThreadSanitizer.
+
+Packaging:
+- **CPack**: `cpack --config build/CPackConfig.cmake -G "DEB;RPM;TGZ"`
+- **vcpkg**: Manifest and port files are provided in `packaging/vcpkg/`.
 
 ### Integration Example
 
@@ -118,6 +133,31 @@ int main() {
     return pipeline.last_status() == chronoring::RingStatus::Ok ? 0 : 1;
 }
 ```
+
+### Python Quickstart
+
+Build with `-DCHRONORING_BUILD_SHARED=ON`, then run with `PYTHONPATH=python`:
+
+```python
+import chronoring
+
+cfg = chronoring.default_pipeline_config()
+cfg.output_path = b"run_001.crng"
+cfg.enable_compression = 1
+cfg.trigger.min_energy_mev = 10.0
+
+with chronoring.TelemetryPipeline(cfg) as pipe:
+    ev = chronoring.EventFrame(energy_mev=42.5, quality_flags=0x1, multiplicity=2)
+    pipe.submit_wait(ev)
+    pipe.stop()
+    st = pipe.stats()
+    print(f"Passed={st.passed_events} Pages={st.pages_written}")
+
+with chronoring.ColumnarReader("run_001.crng") as reader:
+    assert reader.verify_all()
+```
+
+See [python/examples/quickstart.py](python/examples/quickstart.py) for a complete runnable script.
 
 ---
 
