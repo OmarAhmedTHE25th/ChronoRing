@@ -1,6 +1,8 @@
 build/
 build-*/
 cmake-build-*/
+__pycache__/
+*.py[cod]
 *.crng
 *.json
 .DS_Store
