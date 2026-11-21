@@ -1,4 +1,5 @@
 #include "chronoring/columnar_sink.hpp"
+#include "chronoring/lz4_codec.hpp"
 #include "chronoring/simd_trigger.hpp"
 
 #include <algorithm>
@@ -277,8 +278,9 @@ bool verify_page_crc(const ColumnarPage& page) noexcept {
 // ============================================================================
 
 ColumnarSink::ColumnarSink(std::string path, std::size_t initial_page_capacity,
-                           std::uint16_t projection_mask) {
-    (void)open(std::move(path), initial_page_capacity, projection_mask);
+                           std::uint16_t projection_mask,
+                           bool enable_compression) {
+    (void)open(std::move(path), initial_page_capacity, projection_mask, enable_compression);
 }
 
 ColumnarSink::~ColumnarSink() {
@@ -290,10 +292,13 @@ ColumnarSink::ColumnarSink(ColumnarSink&& other) noexcept
       last_error_(std::move(other.last_error_)),
       last_status_(other.last_status_),
       projection_mask_(other.projection_mask_),
+      enable_compression_(other.enable_compression_),
       staging_page_(std::move(other.staging_page_)),
+      compress_scratch_(std::move(other.compress_scratch_)),
       pages_(other.pages_),
       mapped_page_capacity_(other.mapped_page_capacity_),
       committed_pages_(other.committed_pages_),
+      committed_bytes_(other.committed_bytes_),
       active_page_count_(other.active_page_count_),
       total_events_(other.total_events_),
       active_min_ts_(other.active_min_ts_),
@@ -310,6 +315,7 @@ ColumnarSink::ColumnarSink(ColumnarSink&& other) noexcept
     other.pages_ = nullptr;
     other.mapped_page_capacity_ = 0;
     other.committed_pages_ = 0;
+    other.committed_bytes_ = 0;
     other.active_page_count_ = 0;
     other.total_events_ = 0;
 #ifdef _WIN32
@@ -327,10 +333,13 @@ ColumnarSink& ColumnarSink::operator=(ColumnarSink&& other) noexcept {
         last_error_ = std::move(other.last_error_);
         last_status_ = other.last_status_;
         projection_mask_ = other.projection_mask_;
+        enable_compression_ = other.enable_compression_;
         staging_page_ = std::move(other.staging_page_);
+        compress_scratch_ = std::move(other.compress_scratch_);
         pages_ = other.pages_;
         mapped_page_capacity_ = other.mapped_page_capacity_;
         committed_pages_ = other.committed_pages_;
+        committed_bytes_ = other.committed_bytes_;
         active_page_count_ = other.active_page_count_;
         total_events_ = other.total_events_;
         active_min_ts_ = other.active_min_ts_;
@@ -349,6 +358,7 @@ ColumnarSink& ColumnarSink::operator=(ColumnarSink&& other) noexcept {
         other.pages_ = nullptr;
         other.mapped_page_capacity_ = 0;
         other.committed_pages_ = 0;
+        other.committed_bytes_ = 0;
         other.active_page_count_ = 0;
         other.total_events_ = 0;
     }
@@ -356,19 +366,25 @@ ColumnarSink& ColumnarSink::operator=(ColumnarSink&& other) noexcept {
 }
 
 bool ColumnarSink::open(std::string path, std::size_t initial_page_capacity,
-                        std::uint16_t projection_mask) {
+                        std::uint16_t projection_mask, bool enable_compression) {
     close();
     path_ = std::move(path);
     last_error_.clear();
     last_status_ = RingStatus::Ok;
     projection_mask_ =
         (projection_mask == 0u) ? static_cast<std::uint16_t>(kColAll) : projection_mask;
+    enable_compression_ = enable_compression;
     committed_pages_ = 0;
+    committed_bytes_ = 0;
     active_page_count_ = 0;
     total_events_ = 0;
 
     if (!staging_page_) {
         staging_page_ = std::make_unique<ColumnarPage>();
+    }
+    if (enable_compression_) {
+        constexpr std::size_t kPayloadBytes = sizeof(ColumnarPage) - sizeof(ColumnarPageHeader);
+        compress_scratch_.resize(lz4_compress_bound(kPayloadBytes));
     }
 
     const std::size_t cap = std::max<std::size_t>(initial_page_capacity, 4);
@@ -530,11 +546,6 @@ bool ColumnarSink::commit_active_page() noexcept {
     if (pages_ == nullptr || !staging_page_ || active_page_count_ == 0) {
         return true;
     }
-    if (committed_pages_ >= mapped_page_capacity_) {
-        if (!map_pages(mapped_page_capacity_ * 2)) {
-            return false;
-        }
-    }
 
     ColumnarPage& page = *staging_page_;
     page.header.magic = kColumnarPageMagic;
@@ -546,17 +557,53 @@ bool ColumnarSink::commit_active_page() noexcept {
     page.header.max_timestamp_ns = active_max_ts_;
     page.header.first_sequence_id = active_first_seq_;
     page.header.last_sequence_id = active_last_seq_;
-    finalize_page_crc(page);
+    page.header.compressed_bytes = 0;
+    page.header.projection_mask = projection_mask_;
 
-    std::memcpy(static_cast<void*>(pages_ + committed_pages_), &page, sizeof(ColumnarPage));
-    ++committed_pages_;
-    active_page_count_ = 0;
+    constexpr std::size_t kPayloadBytes = sizeof(ColumnarPage) - sizeof(ColumnarPageHeader);
+    std::size_t write_bytes = sizeof(ColumnarPage);
+    bool wrote_compressed = false;
 
-    if (committed_pages_ >= mapped_page_capacity_) {
-        if (!map_pages(mapped_page_capacity_ * 2)) {
+    if (enable_compression_ && !compress_scratch_.empty()) {
+        zero_unused_page_tail(page, active_page_count_);
+        const auto* payload =
+            reinterpret_cast<const std::uint8_t*>(&page) + sizeof(ColumnarPageHeader);
+        const std::size_t comp_len = lz4_compress(
+            payload, kPayloadBytes, compress_scratch_.data(), compress_scratch_.size());
+        if (comp_len > 0 && comp_len < kPayloadBytes) {
+            page.header.flags = static_cast<std::uint16_t>(projection_mask_ | kPageFlagLz4);
+            page.header.compressed_bytes = static_cast<std::uint32_t>(comp_len);
+            page.header.data_crc32c = crc32c(compress_scratch_.data(), comp_len);
+            page.header.header_crc32c = 0;
+            page.header.header_crc32c = crc32c(&page.header, sizeof(ColumnarPageHeader));
+            write_bytes = sizeof(ColumnarPageHeader) + comp_len;
+            wrote_compressed = true;
+        }
+    }
+
+    if (!wrote_compressed) {
+        finalize_page_crc(page);
+    }
+
+    const std::size_t mapped_bytes = mapped_page_capacity_ * sizeof(ColumnarPage);
+    if (committed_bytes_ + write_bytes > mapped_bytes) {
+        if (!map_pages(std::max(mapped_page_capacity_ * 2, committed_pages_ + 2))) {
             return false;
         }
     }
+
+    auto* dst = reinterpret_cast<std::uint8_t*>(pages_) + committed_bytes_;
+    if (wrote_compressed) {
+        std::memcpy(dst, &page.header, sizeof(ColumnarPageHeader));
+        std::memcpy(dst + sizeof(ColumnarPageHeader),
+                    compress_scratch_.data(), page.header.compressed_bytes);
+    } else {
+        std::memcpy(dst, &page, sizeof(ColumnarPage));
+    }
+
+    committed_bytes_ += write_bytes;
+    ++committed_pages_;
+    active_page_count_ = 0;
     init_active_page();
     return true;
 }
@@ -638,16 +685,16 @@ bool ColumnarSink::flush() noexcept {
         }
     }
 #ifdef _WIN32
-    if (committed_pages_ > 0) {
-        if (!FlushViewOfFile(pages_, committed_pages_ * sizeof(ColumnarPage))) {
+    if (committed_bytes_ > 0) {
+        if (!FlushViewOfFile(pages_, committed_bytes_)) {
             last_status_ = RingStatus::IoError;
             return false;
         }
     }
     return FlushFileBuffers(static_cast<HANDLE>(file_handle_)) != FALSE;
 #else
-    if (committed_pages_ > 0) {
-        if (::msync(pages_, committed_pages_ * sizeof(ColumnarPage), MS_SYNC) != 0) {
+    if (committed_bytes_ > 0) {
+        if (::msync(pages_, committed_bytes_, MS_SYNC) != 0) {
             last_status_ = RingStatus::IoError;
             last_error_ = std::string("msync failed: ") + std::strerror(errno);
             emit_log(LogLevel::Error, last_status_, "columnar_sink", last_error_);
@@ -663,7 +710,7 @@ void ColumnarSink::close() noexcept {
         (void)flush();
         unmap_pages();
     }
-    const std::size_t final_bytes = committed_pages_ * sizeof(ColumnarPage);
+    const std::size_t final_bytes = committed_bytes_;
 #ifdef _WIN32
     if (file_handle_ != nullptr) {
         LARGE_INTEGER li{};
@@ -705,6 +752,7 @@ ColumnarReader::ColumnarReader(ColumnarReader&& other) noexcept
       last_status_(other.last_status_),
       mapped_base_(other.mapped_base_),
       pages_(other.pages_),
+      page_offsets_(std::move(other.page_offsets_)),
       file_bytes_(other.file_bytes_),
       num_pages_(other.num_pages_),
       size_aligned_(other.size_aligned_),
@@ -736,6 +784,7 @@ ColumnarReader& ColumnarReader::operator=(ColumnarReader&& other) noexcept {
         last_status_ = other.last_status_;
         mapped_base_ = other.mapped_base_;
         pages_ = other.pages_;
+        page_offsets_ = std::move(other.page_offsets_);
         file_bytes_ = other.file_bytes_;
         num_pages_ = other.num_pages_;
         size_aligned_ = other.size_aligned_;
@@ -809,7 +858,6 @@ bool ColumnarReader::open(std::string path) {
     mapping_handle_ = mh;
     mapped_base_ = view;
     pages_ = static_cast<const ColumnarPage*>(view);
-    return true;
 #else
     const int fd = ::open(path_.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -827,10 +875,10 @@ bool ColumnarReader::open(std::string path) {
         return false;
     }
     file_bytes_ = static_cast<std::size_t>(st.st_size);
-    size_aligned_ = (file_bytes_ % sizeof(ColumnarPage)) == 0;
-    num_pages_ = file_bytes_ / sizeof(ColumnarPage);
     if (file_bytes_ == 0) {
         ::close(fd);
+        size_aligned_ = true;
+        num_pages_ = 0;
         return true;
     }
     void* view = ::mmap(nullptr, file_bytes_, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -844,8 +892,42 @@ bool ColumnarReader::open(std::string path) {
     fd_ = fd;
     mapped_base_ = view;
     pages_ = static_cast<const ColumnarPage*>(view);
-    return true;
 #endif
+
+    page_offsets_.clear();
+    size_aligned_ = true;
+    const auto* base = static_cast<const std::uint8_t*>(mapped_base_);
+    std::size_t offset = 0;
+    while (offset < file_bytes_) {
+        if (offset + sizeof(ColumnarPageHeader) > file_bytes_) {
+            size_aligned_ = false;
+            break;
+        }
+        ColumnarPageHeader hdr{};
+        std::memcpy(&hdr, base + offset, sizeof(ColumnarPageHeader));
+        if (hdr.magic != kColumnarPageMagic ||
+            hdr.capacity != static_cast<std::uint32_t>(kColumnarPageEvents)) {
+            size_aligned_ = false;
+            break;
+        }
+        std::size_t page_bytes = sizeof(ColumnarPage);
+        if ((hdr.flags & kPageFlagLz4) != 0u) {
+            if (hdr.compressed_bytes == 0 ||
+                hdr.compressed_bytes > (sizeof(ColumnarPage) - sizeof(ColumnarPageHeader))) {
+                size_aligned_ = false;
+                break;
+            }
+            page_bytes = sizeof(ColumnarPageHeader) + hdr.compressed_bytes;
+        }
+        if (offset + page_bytes > file_bytes_) {
+            size_aligned_ = false;
+            break;
+        }
+        page_offsets_.push_back(offset);
+        offset += page_bytes;
+    }
+    num_pages_ = page_offsets_.size();
+    return true;
 }
 
 void ColumnarReader::close() noexcept {
@@ -873,15 +955,62 @@ void ColumnarReader::close() noexcept {
     }
 #endif
     pages_ = nullptr;
+    page_offsets_.clear();
     file_bytes_ = 0;
     num_pages_ = 0;
     size_aligned_ = true;
 }
 
+bool ColumnarReader::verify_page_at(std::size_t index) const noexcept {
+    if (index >= num_pages_ || mapped_base_ == nullptr) {
+        return false;
+    }
+    const auto* base = static_cast<const std::uint8_t*>(mapped_base_) + page_offsets_[index];
+    ColumnarPageHeader hdr{};
+    std::memcpy(&hdr, base, sizeof(ColumnarPageHeader));
+    if (hdr.magic != kColumnarPageMagic ||
+        hdr.version != kColumnarFormatVersion ||
+        hdr.capacity != static_cast<std::uint32_t>(kColumnarPageEvents) ||
+        hdr.event_count > kColumnarPageEvents) {
+        return false;
+    }
+    ColumnarPageHeader hdr_copy = hdr;
+    hdr_copy.header_crc32c = 0;
+    if (crc32c(&hdr_copy, sizeof(ColumnarPageHeader)) != hdr.header_crc32c) {
+        return false;
+    }
+    const auto* payload = base + sizeof(ColumnarPageHeader);
+    const std::size_t payload_bytes = ((hdr.flags & kPageFlagLz4) != 0u)
+                                          ? static_cast<std::size_t>(hdr.compressed_bytes)
+                                          : (sizeof(ColumnarPage) - sizeof(ColumnarPageHeader));
+    return crc32c(payload, payload_bytes) == hdr.data_crc32c;
+}
+
+bool ColumnarReader::read_page(std::size_t index, ColumnarPage& out) const noexcept {
+    if (!verify_page_at(index)) {
+        return false;
+    }
+    const auto* base = static_cast<const std::uint8_t*>(mapped_base_) + page_offsets_[index];
+    ColumnarPageHeader hdr{};
+    std::memcpy(&hdr, base, sizeof(ColumnarPageHeader));
+    if ((hdr.flags & kPageFlagLz4) == 0u) {
+        std::memcpy(static_cast<void*>(&out), base, sizeof(ColumnarPage));
+        return true;
+    }
+    out = ColumnarPage{};
+    out.header = hdr;
+    constexpr std::size_t kPayloadBytes = sizeof(ColumnarPage) - sizeof(ColumnarPageHeader);
+    auto* dst_payload =
+        reinterpret_cast<std::uint8_t*>(&out) + sizeof(ColumnarPageHeader);
+    const std::size_t decomp = lz4_decompress(
+        base + sizeof(ColumnarPageHeader), hdr.compressed_bytes, dst_payload, kPayloadBytes);
+    return decomp == kPayloadBytes;
+}
+
 std::size_t ColumnarReader::total_events() const noexcept {
     std::size_t total = 0;
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        total += std::min<std::size_t>(pages_[i].header.event_count, kColumnarPageEvents);
+        total += std::min<std::size_t>(page_header(i).event_count, kColumnarPageEvents);
     }
     return total;
 }
@@ -892,11 +1021,11 @@ bool ColumnarReader::verify_all_pages(std::size_t* corrupted_page_index) const n
             *corrupted_page_index = num_pages_;
         }
         emit_log(LogLevel::Error, RingStatus::CorruptedPage, "columnar_reader",
-                 "Columnar file size is not aligned to page size", file_bytes_);
+                 "Columnar file size or page framing is corrupted", file_bytes_);
         return false;
     }
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        if (!verify_page_crc(pages_[i])) {
+        if (!verify_page_at(i)) {
             if (corrupted_page_index != nullptr) {
                 *corrupted_page_index = i;
             }
@@ -912,7 +1041,7 @@ std::vector<PageIndexEntry> ColumnarReader::page_index() const {
     std::vector<PageIndexEntry> entries;
     entries.reserve(num_pages_);
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        const ColumnarPageHeader& h = pages_[i].header;
+        const ColumnarPageHeader& h = page_header(i);
         entries.push_back(PageIndexEntry{
             i,
             h.event_count,
@@ -931,7 +1060,7 @@ std::vector<std::size_t> ColumnarReader::find_pages_by_timestamp(
         return matches;
     }
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        const ColumnarPageHeader& h = pages_[i].header;
+        const ColumnarPageHeader& h = page_header(i);
         if (h.event_count == 0 || h.magic != kColumnarPageMagic) {
             continue;
         }
@@ -945,7 +1074,7 @@ std::vector<std::size_t> ColumnarReader::find_pages_by_timestamp(
 Expected<std::size_t, RingStatus> ColumnarReader::find_page_by_sequence(
     std::uint64_t sequence_id) const noexcept {
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        const ColumnarPageHeader& h = pages_[i].header;
+        const ColumnarPageHeader& h = page_header(i);
         if (h.event_count == 0 || h.magic != kColumnarPageMagic) {
             continue;
         }
@@ -967,14 +1096,26 @@ Expected<std::size_t, RingStatus> ColumnarReader::replay_filtered(
     }
     std::size_t total_passed = 0;
     std::uint64_t total_scanned = 0;
+    std::unique_ptr<ColumnarPage> decomp_scratch;
     for (std::size_t i = 0; i < num_pages_; ++i) {
-        if (!verify_page_crc(pages_[i])) {
+        if (!verify_page_at(i)) {
             emit_log(LogLevel::Error, RingStatus::CorruptedPage, "columnar_reader",
                      "Replay aborted on corrupted page", i);
             return unexpected(RingStatus::CorruptedPage);
         }
-        total_scanned += std::min<std::size_t>(pages_[i].header.event_count, kColumnarPageEvents);
-        total_passed += evaluate_columnar_page(pages_[i], cfg, nullptr, backend);
+        const ColumnarPageHeader& h = page_header(i);
+        total_scanned += std::min<std::size_t>(h.event_count, kColumnarPageEvents);
+        if ((h.flags & kPageFlagLz4) != 0u) {
+            if (!decomp_scratch) {
+                decomp_scratch = std::make_unique<ColumnarPage>();
+            }
+            if (!read_page(i, *decomp_scratch)) {
+                return unexpected(RingStatus::CompressionError);
+            }
+            total_passed += evaluate_columnar_page(*decomp_scratch, cfg, nullptr, backend);
+        } else {
+            total_passed += evaluate_columnar_page(page(i), cfg, nullptr, backend);
+        }
     }
     if (out_total_scanned != nullptr) {
         *out_total_scanned = total_scanned;
