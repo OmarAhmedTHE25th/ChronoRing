@@ -82,6 +82,7 @@ class TriggerConfig(ctypes.Structure):
 class PipelineConfig(ctypes.Structure):
     _fields_ = [
         ("output_path", ctypes.c_char_p),
+        ("secondary_output_path", ctypes.c_char_p),
         ("trigger", TriggerConfig),
         ("consumer_cpu_core", ctypes.c_int),
         ("batch_size", ctypes.c_size_t),
@@ -123,10 +124,45 @@ class PipelineStats(ctypes.Structure):
 
 # Bind C ABI signatures
 _lib.chronoring_version.restype = ctypes.c_char_p
+_lib.chronoring_status_string.argtypes = [ctypes.c_int]
+_lib.chronoring_status_string.restype = ctypes.c_char_p
 _lib.chronoring_default_trigger_config.restype = TriggerConfig
 _lib.chronoring_default_pipeline_config.restype = PipelineConfig
+_lib.chronoring_filter_events.argtypes = [
+    ctypes.POINTER(EventFrame),
+    ctypes.c_size_t,
+    ctypes.POINTER(TriggerConfig),
+    ctypes.POINTER(EventFrame),
+]
+_lib.chronoring_filter_events.restype = ctypes.c_size_t
 _lib.chronoring_crc32c.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
 _lib.chronoring_crc32c.restype = ctypes.c_uint32
+
+_lib.chronoring_spsc_create.restype = ctypes.c_void_p
+_lib.chronoring_spsc_destroy.argtypes = [ctypes.c_void_p]
+_lib.chronoring_spsc_try_push.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
+_lib.chronoring_spsc_try_push.restype = ctypes.c_int
+_lib.chronoring_spsc_try_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
+_lib.chronoring_spsc_try_pop.restype = ctypes.c_int
+_lib.chronoring_spsc_size.argtypes = [ctypes.c_void_p]
+_lib.chronoring_spsc_size.restype = ctypes.c_size_t
+
+_lib.chronoring_shm_create.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int]
+_lib.chronoring_shm_create.restype = ctypes.c_void_p
+_lib.chronoring_shm_open.argtypes = [ctypes.c_char_p]
+_lib.chronoring_shm_open.restype = ctypes.c_void_p
+_lib.chronoring_shm_try_push.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
+_lib.chronoring_shm_try_push.restype = ctypes.c_int
+_lib.chronoring_shm_try_pop.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
+_lib.chronoring_shm_try_pop.restype = ctypes.c_int
+_lib.chronoring_shm_is_closed.argtypes = [ctypes.c_void_p]
+_lib.chronoring_shm_is_closed.restype = ctypes.c_int
+_lib.chronoring_shm_size.argtypes = [ctypes.c_void_p]
+_lib.chronoring_shm_size.restype = ctypes.c_size_t
+_lib.chronoring_shm_close.argtypes = [ctypes.c_void_p]
+_lib.chronoring_shm_unlink.argtypes = [ctypes.c_char_p]
+_lib.chronoring_shm_unlink.restype = ctypes.c_int
+_lib.chronoring_shm_destroy.argtypes = [ctypes.c_void_p]
 
 _lib.chronoring_sink_create.restype = ctypes.c_void_p
 _lib.chronoring_sink_open.argtypes = [
@@ -145,6 +181,8 @@ _lib.chronoring_sink_pages_written.argtypes = [ctypes.c_void_p]
 _lib.chronoring_sink_pages_written.restype = ctypes.c_size_t
 _lib.chronoring_sink_events_written.argtypes = [ctypes.c_void_p]
 _lib.chronoring_sink_events_written.restype = ctypes.c_size_t
+_lib.chronoring_sink_bytes_written.argtypes = [ctypes.c_void_p]
+_lib.chronoring_sink_bytes_written.restype = ctypes.c_size_t
 
 _lib.chronoring_reader_open.argtypes = [ctypes.c_char_p]
 _lib.chronoring_reader_open.restype = ctypes.c_void_p
@@ -166,6 +204,14 @@ _lib.chronoring_pipeline_start.argtypes = [ctypes.c_void_p]
 _lib.chronoring_pipeline_start.restype = ctypes.c_int
 _lib.chronoring_pipeline_submit.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
 _lib.chronoring_pipeline_submit.restype = ctypes.c_int
+_lib.chronoring_pipeline_submit_wait.argtypes = [ctypes.c_void_p, ctypes.POINTER(EventFrame)]
+_lib.chronoring_pipeline_submit_wait.restype = ctypes.c_int
+_lib.chronoring_pipeline_is_backpressured.argtypes = [ctypes.c_void_p]
+_lib.chronoring_pipeline_is_backpressured.restype = ctypes.c_int
+_lib.chronoring_pipeline_ring_fill_ratio.argtypes = [ctypes.c_void_p]
+_lib.chronoring_pipeline_ring_fill_ratio.restype = ctypes.c_double
+_lib.chronoring_pipeline_last_status.argtypes = [ctypes.c_void_p]
+_lib.chronoring_pipeline_last_status.restype = ctypes.c_int
 _lib.chronoring_pipeline_stop.argtypes = [ctypes.c_void_p]
 _lib.chronoring_pipeline_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(PipelineStats)]
 _lib.chronoring_pipeline_destroy.argtypes = [ctypes.c_void_p]
@@ -175,12 +221,116 @@ def version() -> str:
     return _lib.chronoring_version().decode("utf-8")
 
 
+def status_string(status: int) -> str:
+    return _lib.chronoring_status_string(int(status)).decode("utf-8")
+
+
+def crc32c(data: bytes, initial: int = 0) -> int:
+    if not data:
+        return int(initial)
+    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    return int(_lib.chronoring_crc32c(ctypes.cast(buf, ctypes.c_void_p), len(data), initial))
+
+
+def filter_events(
+    frames: list[EventFrame], cfg: Optional[TriggerConfig] = None
+) -> list[EventFrame]:
+    if not frames:
+        return []
+    in_arr = (EventFrame * len(frames))(*frames)
+    out_arr = (EventFrame * len(frames))()
+    cfg_ref = ctypes.byref(cfg) if cfg is not None else None
+    kept = int(_lib.chronoring_filter_events(in_arr, len(frames), cfg_ref, out_arr))
+    return [out_arr[i] for i in range(kept)]
+
+
 def default_trigger_config() -> TriggerConfig:
     return _lib.chronoring_default_trigger_config()
 
 
 def default_pipeline_config() -> PipelineConfig:
     return _lib.chronoring_default_pipeline_config()
+
+
+class SpscRing:
+    def __init__(self) -> None:
+        self._handle = _lib.chronoring_spsc_create()
+        if not self._handle:
+            raise MemoryError("Failed to allocate SpscRing")
+
+    def try_push(self, frame: EventFrame) -> bool:
+        return bool(_lib.chronoring_spsc_try_push(self._handle, ctypes.byref(frame)))
+
+    def try_pop(self) -> Optional[EventFrame]:
+        out = EventFrame()
+        if _lib.chronoring_spsc_try_pop(self._handle, ctypes.byref(out)):
+            return out
+        return None
+
+    def size(self) -> int:
+        return int(_lib.chronoring_spsc_size(self._handle))
+
+    def close(self) -> None:
+        if self._handle:
+            _lib.chronoring_spsc_destroy(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "SpscRing":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class ShmRing:
+    def __init__(
+        self,
+        name: str,
+        create: bool = False,
+        capacity: int = 4096,
+        unlink_on_destroy: bool = False,
+    ) -> None:
+        encoded = name.encode("utf-8")
+        if create:
+            self._handle = _lib.chronoring_shm_create(
+                encoded, capacity, 1 if unlink_on_destroy else 0
+            )
+        else:
+            self._handle = _lib.chronoring_shm_open(encoded)
+        if not self._handle:
+            raise OSError(f"Failed to {'create' if create else 'open'} ShmRing: {name}")
+
+    def try_push(self, frame: EventFrame) -> bool:
+        return bool(_lib.chronoring_shm_try_push(self._handle, ctypes.byref(frame)))
+
+    def try_pop(self) -> Optional[EventFrame]:
+        out = EventFrame()
+        if _lib.chronoring_shm_try_pop(self._handle, ctypes.byref(out)):
+            return out
+        return None
+
+    def size(self) -> int:
+        return int(_lib.chronoring_shm_size(self._handle))
+
+    @property
+    def is_closed(self) -> bool:
+        return bool(_lib.chronoring_shm_is_closed(self._handle))
+
+    def close(self) -> None:
+        if self._handle:
+            _lib.chronoring_shm_close(self._handle)
+            _lib.chronoring_shm_destroy(self._handle)
+            self._handle = None
+
+    @staticmethod
+    def unlink(name: str) -> bool:
+        return bool(_lib.chronoring_shm_unlink(name.encode("utf-8")))
+
+    def __enter__(self) -> "ShmRing":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 class ColumnarSink:
@@ -214,6 +364,10 @@ class ColumnarSink:
 
     def flush(self) -> bool:
         return bool(_lib.chronoring_sink_flush(self._handle))
+
+    @property
+    def bytes_written(self) -> int:
+        return int(_lib.chronoring_sink_bytes_written(self._handle))
 
     def close(self) -> None:
         if self._handle:
@@ -277,6 +431,21 @@ class TelemetryPipeline:
 
     def submit(self, frame: EventFrame) -> bool:
         return bool(_lib.chronoring_pipeline_submit(self._handle, ctypes.byref(frame)))
+
+    def submit_wait(self, frame: EventFrame) -> bool:
+        return bool(_lib.chronoring_pipeline_submit_wait(self._handle, ctypes.byref(frame)))
+
+    @property
+    def is_backpressured(self) -> bool:
+        return bool(_lib.chronoring_pipeline_is_backpressured(self._handle))
+
+    @property
+    def ring_fill_ratio(self) -> float:
+        return float(_lib.chronoring_pipeline_ring_fill_ratio(self._handle))
+
+    @property
+    def last_status(self) -> int:
+        return int(_lib.chronoring_pipeline_last_status(self._handle))
 
     def stop(self) -> None:
         if self._handle:
