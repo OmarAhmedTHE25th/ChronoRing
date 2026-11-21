@@ -1,0 +1,75 @@
+name: ChronoRing CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC Release
+            cc: gcc
+            cxx: g++
+            build_type: Release
+            cmake_flags: ""
+            run_bench: true
+          - name: Clang Release
+            cc: clang
+            cxx: clang++
+            build_type: Release
+            cmake_flags: ""
+            run_bench: false
+          - name: ASan + UBSan
+            cc: clang
+            cxx: clang++
+            build_type: RelWithDebInfo
+            cmake_flags: "-DCHRONORING_ENABLE_ASAN_UBSAN=ON -DCHRONORING_BUILD_BENCHMARKS=OFF"
+            run_bench: false
+          - name: ThreadSanitizer (TSan)
+            cc: clang
+            cxx: clang++
+            build_type: RelWithDebInfo
+            cmake_flags: "-DCHRONORING_ENABLE_TSAN=ON -DCHRONORING_BUILD_BENCHMARKS=OFF"
+            run_bench: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libgtest-dev libbenchmark-dev
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            ${{ matrix.cmake_flags }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run unit tests (CTest)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Run CLI demo & JSON report smoke check
+        if: matrix.build_type == 'Release'
+        run: |
+          ./build/chronoring --demo 50000
+          ./build/chronoring --json-report build/report.json
+          test -s build/report.json
+
+      - name: Run Google Benchmark smoke suite
+        if: matrix.run_bench
+        run: ./build/bench_chronoring --benchmark_min_time=0.05s
