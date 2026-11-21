@@ -1,11 +1,4 @@
-#include "chronoring/columnar_sink.hpp"
-#include "chronoring/event_frame.hpp"
-#include "chronoring/latency_histogram.hpp"
-#include "chronoring/mpsc_ring.hpp"
-#include "chronoring/pipeline.hpp"
-#include "chronoring/shm_ring.hpp"
-#include "chronoring/simd_trigger.hpp"
-#include "chronoring/spsc_ring.hpp"
+#include "chronoring/chronoring.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -45,12 +38,16 @@ EventFrame make_synthetic_event(std::uint64_t seq) noexcept {
 }
 
 void print_usage(const char* argv0) {
-    std::cout << "ChronoRing — Lock-Free Ring-Buffer Telemetry & SIMD Trigger Engine\n\n"
+    std::cout << "ChronoRing v" << version()
+              << " — Lock-Free Ring-Buffer Telemetry & SIMD Trigger Engine\n\n"
               << "Usage:\n"
               << "  " << argv0 << " --demo [event_count] [output_file]\n"
               << "  " << argv0 << " --json-report [report_path]\n"
+              << "  " << argv0 << " --prometheus [event_count]\n"
+              << "  " << argv0 << " --replay <crng_file>\n"
               << "  " << argv0 << " --shm-producer <shm_name> <event_count>\n"
               << "  " << argv0 << " --shm-consumer <shm_name> <event_count>\n"
+              << "  " << argv0 << " --version\n"
               << "  " << argv0 << " --help\n";
 }
 
@@ -101,7 +98,7 @@ int run_demo(std::size_t event_count, const std::string& explicit_out) {
         std::filesystem::remove(out_path, ec);
     }
 
-    std::cout << "=== ChronoRing Live Telemetry Pipeline Demo ===\n"
+    std::cout << "=== ChronoRing v" << version() << " Live Telemetry Pipeline Demo ===\n"
               << "SIMD Backend      : " << backend_name(active_backend()) << "\n"
               << "Events Submitted  : " << stats.submitted_events << "\n"
               << "Events Consumed   : " << stats.consumed_events << "\n"
@@ -110,6 +107,7 @@ int run_demo(std::size_t event_count, const std::string& explicit_out) {
               << "Columnar Pages    : " << verified_pages << "\n"
               << "Persisted Events  : " << verified_events << "\n"
               << "CRC32C Integrity  : " << (crc_ok ? "VERIFIED" : "FAILED") << "\n"
+              << "Pipeline Status   : " << status_string(stats.last_status) << "\n"
               << std::fixed << std::setprecision(3)
               << "Elapsed (s)       : " << stats.elapsed_seconds << "\n"
               << "Throughput (Meps) : " << stats.throughput_meps << "\n"
@@ -120,7 +118,59 @@ int run_demo(std::size_t event_count, const std::string& explicit_out) {
               << "Latency p99.9 (ns): " << stats.p99_9_ns << "\n"
               << "Latency max (ns)  : " << stats.max_ns << "\n";
 
+    return (crc_ok && stats.last_status == RingStatus::Ok) ? 0 : 1;
+}
+
+int run_prometheus(std::size_t event_count) {
+    const std::filesystem::path out_path =
+        std::filesystem::temp_directory_path() / "chronoring_prom.crng";
+    bool crc_ok = false;
+    std::size_t verified_pages = 0;
+    std::size_t verified_events = 0;
+    const PipelineStats stats = run_pipeline_benchmark(
+        event_count, out_path.string(), crc_ok, verified_pages, verified_events);
+    {
+        std::error_code ec;
+        std::filesystem::remove(out_path, ec);
+    }
+    std::cout << to_prometheus_text(stats);
     return crc_ok ? 0 : 1;
+}
+
+int run_replay(const std::string& file_path) {
+    ColumnarReader reader(file_path);
+    if (!reader.is_open() && reader.num_pages() == 0) {
+        std::cerr << "Failed to open columnar file '" << file_path
+                  << "': " << reader.last_error() << "\n";
+        return 1;
+    }
+
+    const TriggerConfig cfg{};
+    std::uint64_t total_scanned = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const Expected<std::size_t, RingStatus> res =
+        reader.replay_filtered(cfg, SimdBackend::Auto, &total_scanned);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    if (!res) {
+        std::cerr << "Replay failed with status: " << status_string(res.error()) << "\n";
+        return 1;
+    }
+
+    const double secs = std::chrono::duration<double>(t1 - t0).count();
+    const double meps =
+        (secs > 0.0) ? (static_cast<double>(total_scanned) / secs / 1e6) : 0.0;
+
+    std::cout << "=== ChronoRing Offline SoA Replay ===\n"
+              << "File              : " << file_path << "\n"
+              << "SIMD Backend      : " << backend_name(active_backend()) << "\n"
+              << "Pages Verified    : " << reader.num_pages() << "\n"
+              << "Events Scanned    : " << total_scanned << "\n"
+              << "Triggered Passed  : " << res.value() << "\n"
+              << std::fixed << std::setprecision(3)
+              << "Elapsed (s)       : " << secs << "\n"
+              << "Replay Rate (Meps): " << meps << "\n";
+    return 0;
 }
 
 int run_json_report(const std::string& report_path) {
@@ -168,6 +218,7 @@ int run_json_report(const std::string& report_path) {
     js << std::fixed << std::setprecision(3)
        << "{\n"
        << "  \"project\": \"ChronoRing\",\n"
+       << "  \"version\": \"" << version() << "\",\n"
        << "  \"simd_backend\": \"" << backend_name(active_backend()) << "\",\n"
        << "  \"avx2_supported\": " << (cpu_supports_avx2() ? "true" : "false") << ",\n"
        << "  \"sse42_supported\": " << (cpu_supports_sse42() ? "true" : "false") << ",\n"
@@ -277,10 +328,21 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
+    if (cmd == "--version" || cmd == "-v") {
+        std::cout << "ChronoRing " << version() << "\n";
+        return 0;
+    }
     if (cmd == "--demo") {
         const std::size_t count = (argc >= 3) ? std::stoull(argv[2]) : 100'000ULL;
         const std::string out_file = (argc >= 4) ? argv[3] : "";
         return run_demo(count, out_file);
+    }
+    if (cmd == "--prometheus") {
+        const std::size_t count = (argc >= 3) ? std::stoull(argv[2]) : 50'000ULL;
+        return run_prometheus(count);
+    }
+    if (cmd == "--replay" && argc >= 3) {
+        return run_replay(argv[2]);
     }
     if (cmd == "--json-report") {
         const std::string out_file = (argc >= 3) ? argv[2] : "";

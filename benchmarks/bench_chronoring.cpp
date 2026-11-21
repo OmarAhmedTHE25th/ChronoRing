@@ -1,14 +1,17 @@
 #include "chronoring/columnar_sink.hpp"
 #include "chronoring/event_frame.hpp"
 #include "chronoring/mpsc_ring.hpp"
+#include "chronoring/pipeline.hpp"
 #include "chronoring/simd_trigger.hpp"
 #include "chronoring/spsc_ring.hpp"
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -76,6 +79,62 @@ void BM_MutexQueue_EventFrame(benchmark::State& state) {
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(kBatch * sizeof(EventFrame)));
 }
 BENCHMARK(BM_MutexQueue_EventFrame);
+
+void BM_MutexQueue_Batched(benchmark::State& state) {
+    constexpr std::size_t kTotal = 10'000;
+    constexpr std::size_t kChunk = 256;
+    const std::vector<EventFrame> chunk(kChunk, make_bench_frame(2));
+
+    for (auto _ : state) {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::queue<EventFrame> q;
+        bool done = false;
+
+        std::thread producer([&]() {
+            std::size_t sent = 0;
+            while (sent < kTotal) {
+                const std::size_t n = std::min(kChunk, kTotal - sent);
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    for (std::size_t i = 0; i < n; ++i) {
+                        q.push(chunk[i]);
+                    }
+                }
+                cv.notify_one();
+                sent += n;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                done = true;
+            }
+            cv.notify_one();
+        });
+
+        std::size_t popped = 0;
+        std::vector<EventFrame> local;
+        local.reserve(kChunk);
+        while (popped < kTotal) {
+            local.clear();
+            {
+                std::unique_lock<std::mutex> lock(mtx);
+                cv.wait(lock, [&]() { return !q.empty() || done; });
+                while (!q.empty() && local.size() < kChunk) {
+                    local.push_back(q.front());
+                    q.pop();
+                }
+            }
+            for (auto& f : local) {
+                benchmark::DoNotOptimize(f);
+            }
+            popped += local.size();
+        }
+        producer.join();
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(kTotal));
+    state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(kTotal * sizeof(EventFrame)));
+}
+BENCHMARK(BM_MutexQueue_Batched);
 
 void BM_SpscRing_EventFrame(benchmark::State& state) {
     constexpr std::size_t kBatch = 10'000;
@@ -198,6 +257,25 @@ void BM_SimdTrigger_SoA(benchmark::State& state, SimdBackend backend) {
 BENCHMARK_CAPTURE(BM_SimdTrigger_SoA, Scalar, SimdBackend::Scalar);
 BENCHMARK_CAPTURE(BM_SimdTrigger_SoA, AVX2, SimdBackend::AVX2);
 
+void BM_SimdTrigger_SoA_FilterCompact(benchmark::State& state) {
+    std::vector<EventFrame> in(kColumnarPageEvents);
+    std::vector<EventFrame> out(kColumnarPageEvents);
+    for (std::size_t i = 0; i < kColumnarPageEvents; ++i) {
+        in[i] = make_bench_frame(i);
+    }
+    auto page = std::make_unique<ColumnarPage>();
+    transpose_aos_to_soa(in.data(), kColumnarPageEvents, *page);
+    const TriggerConfig cfg{};
+
+    for (auto _ : state) {
+        std::size_t kept = filter_columnar_page_to_aos(*page, cfg, out.data(), SimdBackend::Auto);
+        benchmark::DoNotOptimize(kept);
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(kColumnarPageEvents));
+}
+BENCHMARK(BM_SimdTrigger_SoA_FilterCompact);
+
 void BM_Crc32c_SW_Page(benchmark::State& state) {
     auto page = std::make_unique<ColumnarPage>();
     for (auto _ : state) {
@@ -232,6 +310,35 @@ void BM_ColumnarTranspose_AoS_to_SoA(benchmark::State& state) {
     state.SetBytesProcessed(state.iterations() * static_cast<std::int64_t>(sizeof(ColumnarPage)));
 }
 BENCHMARK(BM_ColumnarTranspose_AoS_to_SoA);
+
+void BM_Pipeline_EndToEnd(benchmark::State& state) {
+    constexpr std::size_t kEvents = 20'000;
+    const auto out_path =
+        std::filesystem::temp_directory_path() / "chronoring_bench_pipe.crng";
+    const EventFrame ev = make_bench_frame(1);
+
+    for (auto _ : state) {
+        PipelineConfig cfg;
+        cfg.output_path = out_path.string();
+        cfg.use_soa_staging = true;
+        TelemetryPipeline pipeline(cfg);
+        if (!pipeline.start()) {
+            state.SkipWithError("Failed to start TelemetryPipeline");
+            break;
+        }
+        for (std::size_t i = 0; i < kEvents; ++i) {
+            pipeline.submit_wait(ev);
+        }
+        pipeline.stop();
+        const auto s = pipeline.stats();
+        state.counters["p50_ns"] = static_cast<double>(s.p50_ns);
+        state.counters["p99_ns"] = static_cast<double>(s.p99_ns);
+    }
+    std::error_code ec;
+    std::filesystem::remove(out_path, ec);
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(kEvents));
+}
+BENCHMARK(BM_Pipeline_EndToEnd);
 
 } // namespace
 
