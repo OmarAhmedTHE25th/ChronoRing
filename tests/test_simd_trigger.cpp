@@ -7,6 +7,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <span>
 #include <vector>
 
 namespace chronoring::test {
@@ -50,15 +51,15 @@ std::vector<EventFrame> build_edge_and_random_corpus(std::size_t total) {
 
     if (total >= 20) {
         events[0] = make_base_pass();
-        events[0].energy_mev = 0.5f; // exact min
+        events[0].energy_mev = 0.5f;
         events[1] = make_base_pass();
-        events[1].energy_mev = 10000.0f; // exact max
+        events[1].energy_mev = 10000.0f;
         events[2] = make_base_pass();
         events[2].energy_mev = std::numeric_limits<float>::quiet_NaN();
         events[3] = make_base_pass();
-        events[3].timing_ps = -250.0f; // exact abs boundary
+        events[3].timing_ps = -250.0f;
         events[4] = make_base_pass();
-        events[4].timing_ps = -0.0f; // negative zero
+        events[4].timing_ps = -0.0f;
         events[5] = make_base_pass();
         events[5].timing_ps = std::numeric_limits<float>::quiet_NaN();
         events[6] = make_base_pass();
@@ -66,7 +67,7 @@ std::vector<EventFrame> build_edge_and_random_corpus(std::size_t total) {
         events[7] = make_base_pass();
         events[7].pileup_score = std::numeric_limits<float>::quiet_NaN();
         events[8] = make_base_pass();
-        events[8].multiplicity = 32768u; // unsigned > INT16_MAX
+        events[8].multiplicity = 32768u;
         events[9] = make_base_pass();
         events[9].multiplicity = 65535u;
         events[10] = make_base_pass();
@@ -79,6 +80,11 @@ std::vector<EventFrame> build_edge_and_random_corpus(std::size_t total) {
     return events;
 }
 
+bool custom_detector_even_only(const EventFrame& ev, void* user_ctx) noexcept {
+    const auto* divisor = static_cast<const std::uint32_t*>(user_ctx);
+    return (ev.detector_id % (*divisor)) == 0u;
+}
+
 } // namespace
 
 TEST(SimdTriggerTest, BackendDetectionProducesValidNames) {
@@ -88,11 +94,13 @@ TEST(SimdTriggerTest, BackendDetectionProducesValidNames) {
 }
 
 TEST(SimdTriggerTest, BitExactEquivalenceAoSAndBitmask) {
-    constexpr std::size_t kCount = 4099; // prime/non-multiple of 8
+    constexpr std::size_t kCount = 4099;
     const auto corpus = build_edge_and_random_corpus(kCount);
 
+    std::uint32_t mod = 2;
     std::vector<TriggerConfig> configs;
     configs.push_back(TriggerConfig{});
+
     TriggerConfig strict_cfg{};
     strict_cfg.min_energy_mev = 50.0f;
     strict_cfg.max_energy_mev = 5000.0f;
@@ -102,15 +110,23 @@ TEST(SimdTriggerTest, BitExactEquivalenceAoSAndBitmask) {
     strict_cfg.required_trigger_mask = 0x5u;
     configs.push_back(strict_cfg);
 
+    TriggerConfig custom_cfg = strict_cfg;
+    custom_cfg.min_multiplicity = 1;
+    custom_cfg.custom_predicate = &custom_detector_even_only;
+    custom_cfg.custom_user_ctx = &mod;
+    configs.push_back(custom_cfg);
+
     const std::size_t words = (kCount + 63u) / 64u;
 
     for (const TriggerConfig& cfg : configs) {
         std::vector<EventFrame> out_scalar(kCount);
         std::vector<EventFrame> out_sse(kCount);
         std::vector<EventFrame> out_avx(kCount);
+        std::vector<EventFrame> out_neon(kCount);
         std::vector<std::uint64_t> mask_scalar(words, 0);
         std::vector<std::uint64_t> mask_sse(words, 0);
         std::vector<std::uint64_t> mask_avx(words, 0);
+        std::vector<std::uint64_t> mask_neon(words, 0);
 
         const std::size_t n_scalar =
             filter_events_scalar(corpus.data(), kCount, cfg, out_scalar.data());
@@ -139,11 +155,24 @@ TEST(SimdTriggerTest, BitExactEquivalenceAoSAndBitmask) {
         EXPECT_EQ(std::memcmp(out_avx.data(), out_scalar.data(),
                               n_scalar * sizeof(EventFrame)),
                   0);
+
+        const std::size_t n_neon =
+            filter_events_neon(corpus.data(), kCount, cfg, out_neon.data());
+        const std::size_t b_neon =
+            evaluate_batch_bitmask_neon(corpus.data(), kCount, cfg, mask_neon.data());
+        EXPECT_EQ(n_neon, n_scalar);
+        EXPECT_EQ(b_neon, b_scalar);
+        EXPECT_EQ(mask_neon, mask_scalar);
+        EXPECT_EQ(std::memcmp(out_neon.data(), out_scalar.data(),
+                              n_scalar * sizeof(EventFrame)),
+                  0);
     }
 }
 
-TEST(SimdTriggerTest, BitExactEquivalenceColumnarPageSoA) {
+TEST(SimdTriggerTest, BitExactEquivalenceColumnarPageSoAAndCompaction) {
     const auto full_corpus = build_edge_and_random_corpus(kColumnarPageEvents);
+    std::uint32_t mod = 3;
+
     for (std::size_t count : {std::size_t{777}, kColumnarPageEvents}) {
         ColumnarPage page{};
         transpose_aos_to_soa(full_corpus.data(), count, page);
@@ -151,6 +180,8 @@ TEST(SimdTriggerTest, BitExactEquivalenceColumnarPageSoA) {
         TriggerConfig cfg{};
         cfg.required_trigger_mask = 0x2u;
         cfg.min_multiplicity = 100u;
+        cfg.custom_predicate = &custom_detector_even_only;
+        cfg.custom_user_ctx = &mod;
 
         const std::size_t words = (count + 63u) / 64u;
         std::vector<std::uint64_t> mask_aos(words, 0);
@@ -173,7 +204,84 @@ TEST(SimdTriggerTest, BitExactEquivalenceColumnarPageSoA) {
         EXPECT_EQ(mask_soa_scalar, mask_aos);
         EXPECT_EQ(mask_soa_sse, mask_aos);
         EXPECT_EQ(mask_soa_avx, mask_aos);
+
+        std::vector<EventFrame> compacted_aos(count);
+        std::vector<EventFrame> compacted_soa(count);
+        const std::size_t kept_aos =
+            filter_events(std::span<const EventFrame>(full_corpus.data(), count), cfg,
+                          std::span<EventFrame>(compacted_aos));
+        const std::size_t kept_soa =
+            filter_columnar_page_to_aos(page, cfg, compacted_soa.data());
+        EXPECT_EQ(kept_soa, kept_aos);
+        for (std::size_t i = 0; i < kept_aos; ++i) {
+            EXPECT_EQ(compacted_soa[i].sequence_id, compacted_aos[i].sequence_id);
+        }
     }
+}
+
+TEST(SimdTriggerTest, RejectReasonDiagnosticsAndJsonRoundTrip) {
+    TriggerConfig cfg{};
+    cfg.required_trigger_mask = 0x4u;
+    cfg.min_multiplicity = 3;
+
+    EventFrame good{};
+    good.energy_mev = 50.0f;
+    good.timing_ps = -10.0f;
+    good.pileup_score = 0.2f;
+    good.quality_flags = kFlagValid;
+    good.multiplicity = 3;
+    good.trigger_mask = 0x4u;
+    EXPECT_EQ(diagnose_reject_reasons(good, cfg), kRejectNone);
+
+    EventFrame bad = good;
+    bad.energy_mev = 0.1f;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectMinEnergy);
+
+    bad = good;
+    bad.energy_mev = 50000.0f;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectMaxEnergy);
+
+    bad = good;
+    bad.timing_ps = -300.0f;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectTiming);
+
+    bad = good;
+    bad.pileup_score = 0.9f;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectPileup);
+
+    bad = good;
+    bad.quality_flags = kFlagNone;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectRequiredFlags);
+
+    bad = good;
+    bad.quality_flags = kFlagValid | kFlagVeto;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg), kRejectForbiddenFlags);
+
+    bad = good;
+    bad.multiplicity = 1;
+    bad.trigger_mask = 0x1u;
+    EXPECT_EQ(diagnose_reject_reasons(bad, cfg),
+              static_cast<std::uint8_t>(kRejectMultiplicity | kRejectTriggerMask));
+
+    std::array<EventFrame, 2> pair{good, bad};
+    std::array<std::uint8_t, 2> reasons{};
+    EXPECT_EQ(diagnose_batch_reject_reasons(std::span<const EventFrame>(pair), cfg,
+                                            std::span<std::uint8_t>(reasons)),
+              1U);
+    EXPECT_EQ(reasons[0], kRejectNone);
+    EXPECT_NE(reasons[1], kRejectNone);
+
+    const std::string json = to_json(cfg);
+    TriggerConfig parsed{};
+    EXPECT_TRUE(from_json(json, parsed));
+    EXPECT_FLOAT_EQ(parsed.min_energy_mev, cfg.min_energy_mev);
+    EXPECT_FLOAT_EQ(parsed.max_energy_mev, cfg.max_energy_mev);
+    EXPECT_FLOAT_EQ(parsed.max_abs_timing_ps, cfg.max_abs_timing_ps);
+    EXPECT_FLOAT_EQ(parsed.max_pileup_score, cfg.max_pileup_score);
+    EXPECT_EQ(parsed.required_flags, cfg.required_flags);
+    EXPECT_EQ(parsed.forbidden_flags, cfg.forbidden_flags);
+    EXPECT_EQ(parsed.min_multiplicity, cfg.min_multiplicity);
+    EXPECT_EQ(parsed.required_trigger_mask, cfg.required_trigger_mask);
 }
 
 } // namespace chronoring::test
