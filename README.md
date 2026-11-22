@@ -46,6 +46,8 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `include/chronoring/spsc_ring.hpp` | Wait-free `SpscRingBuffer` (shadow caching, `std::span` batching, zero-copy `try_reserve_push`/`try_peek`) + `SpscFanOut`. |
 | `include/chronoring/mpsc_ring.hpp` | Vyukov lock-free `MpscRingBuffer` with adaptive spin/yield/`std::atomic::wait` (`push_wait`/`pop_wait`). |
 | `include/chronoring/shm_ring.hpp` | Cross-process shared-memory ring (`shm_open`/`mmap` on POSIX, `CreateFileMapping` on Win32) + `ShmScopeGuard`. |
+| `include/chronoring/pcie_cxl_ring.hpp` | Direct PCIe BAR / VFIO / CXL.mem DAX zero-CPU FPGA DMA ring (`PcieCxlRing`, `MockFpgaDmaProducer`). |
+| `include/chronoring/quantum_detector.hpp` | Cryogenic & quantum sensor ingestion adapters (`SNSPD`, `TES`, `MKID`, `SQUID`, `IonTrapQubit`) and trigger presets. |
 | `include/chronoring/simd_trigger.hpp` | AVX2, SSE4.2, NEON, and scalar kernels, `diagnose_reject_reasons`, custom predicate hooks, and JSON config serialization. |
 | `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (projection + optional LZ4 compression) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
 | `include/chronoring/lz4_codec.hpp` | Zero-allocation LZ4-format block encoder/decoder using a fixed 16 KiB stack hash table. |
@@ -179,7 +181,19 @@ See [python/examples/quickstart.py](python/examples/quickstart.py) for a complet
 # Cross-process shared-memory IPC demo
 ./build/chronoring --shm-producer detector_feed 100000
 ./build/chronoring --shm-consumer detector_feed 100000
+
+# Generate a complete C++20 DAQ pipeline from a Detector Description Language (.ddl.json) spec
+python3 tools/chronoring_ddl.py examples/detectors/cryo_snspd_array.ddl.json --out-dir build/gen_snspd
+python3 tools/chronoring_ddl.py examples/detectors/collider_calorimeter.ddl.json --out-dir build/gen_calorimeter
 ```
+
+---
+
+## Formal Verification
+
+Machine-checked proofs and state-space models live in `formal/`:
+- **TLA+ Specifications**: `formal/tla/SpscRing.tla` and `formal/tla/MpscRing.tla` verify shadow-cursor monotonicity, slot mutual exclusion, Vyukov sequence safety, and strict FIFO ordering under TLC.
+- **Lean 4 Proofs**: `formal/lean/ChronoRingProofs.lean` provides zero-`sorry` machine-checked proofs of modular ring disjointness and active ticket exclusivity (see [formal/README.md](formal/README.md)).
 
 ---
 

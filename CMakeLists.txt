@@ -49,6 +49,7 @@ if(CHRONORING_BUILD_SHARED)
     add_library(chronoring_core SHARED
         src/simd_trigger.cpp
         src/shm_ring.cpp
+        src/pcie_cxl_ring.cpp
         src/columnar_sink.cpp
         src/c_api.cpp
     )
@@ -63,6 +64,7 @@ else()
     add_library(chronoring_core STATIC
         src/simd_trigger.cpp
         src/shm_ring.cpp
+        src/pcie_cxl_ring.cpp
         src/columnar_sink.cpp
         src/c_api.cpp
     )
@@ -141,6 +143,8 @@ if(CHRONORING_BUILD_TESTS)
         test_spsc_ring
         test_mpsc_ring
         test_shm_ring
+        test_pcie_cxl_ring
+        test_quantum_detector
         test_simd_trigger
         test_columnar_sink
         test_c_api
