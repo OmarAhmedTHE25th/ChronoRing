@@ -1,0 +1,113 @@
+---
+const formalUrl = "https://github.com/OmarAhmedTHE25th/ChronoRing/tree/main/formal";
+
+const highlights = [
+  {
+    tag: "Concurrency",
+    title: "Lock-Free & Wait-Free Rings",
+    description:
+      "Power-of-two SPSC, Fan-Out, Vyukov MPSC, and MPMC ring buffers with 64-byte cache-line padding, producer-private shadow tail caching, zero-copy reserve/commit writes, and POSIX/Win32 shared-memory IPC.",
+    codeHint: "SpscRingBuffer · MpscRingBuffer · ShmRing",
+    featured: false,
+  },
+  {
+    tag: "Vectorization",
+    title: "SIMD Trigger Kernels",
+    description:
+      "Runtime CPU dispatch across AVX-512, AVX2, SSE4.2, ARM NEON, SVE2, RVV, and WASM-SIMD128 — plus a DSL-compiled trigger engine generating branchless 64-event bitmasks in registers.",
+    codeHint: "evaluate_columnar_page · compile_trigger_dsl",
+    featured: false,
+  },
+  {
+    tag: "Persistence",
+    title: "Zero-Copy Columnar Storage",
+    description:
+      "Events stream into fixed 57,408-byte memory-mapped Structure-of-Arrays pages with column projection masks, zero-allocation stack LZ4 compression, hardware CRC32C, and group-commit WAL.",
+    codeHint: "ColumnarSink · ColumnarReader · DurableColumnarStore",
+    featured: false,
+  },
+  {
+    tag: "Formal Methods",
+    title: "TLA+ & Lean 4 Verification",
+    description:
+      "Machine-checked Lean 4 proofs and TLC state-space models prove cursor monotonicity, slot mutual exclusion, modular disjointness, and linearizability across SPSC and MPSC ring protocols.",
+    codeHint: "SpscRing.tla · MpscRing.tla · ChronoRingProofs.lean",
+    featured: true,
+    link: formalUrl,
+  },
+  {
+    tag: "Ecosystem",
+    title: "Scientific Interoperability",
+    description:
+      "Zero-copy Apache Arrow C Data Interface export, HDF5/Parquet/CERN ROOT schemas, live Python tailers, and clean FFI bindings for Rust, Go, Julia, C#, Java, LabVIEW, MATLAB, and ISO C89.",
+    codeHint: "ChronoArrowArray · export_hdf5_root_schema_json",
+    featured: false,
+  },
+];
+---
+
+<section id="design" class="border-b border-white/[0.06] bg-[#19191C] py-24 sm:py-32">
+  <div class="mx-auto max-w-6xl px-6 sm:px-8">
+    <div class="max-w-2xl">
+      <p class="font-mono text-xs font-medium tracking-[0.14em] text-[#3B82F6] uppercase">
+        Design Highlights
+      </p>
+      <h2 class="mt-4 text-3xl font-semibold tracking-[-0.03em] text-[#F4F5F7] sm:text-4xl">
+        Mechanical sympathy backed by formal proofs.
+      </h2>
+      <p class="mt-4 text-base leading-relaxed text-[#A1A6B3]">
+        Every layer is designed around hardware cache boundaries, predictable memory layouts, and verifiable invariants.
+      </p>
+    </div>
+
+    <div class="mt-14 grid grid-cols-1 gap-6 md:grid-cols-6">
+      {highlights.map((item, idx) => (
+        <article
+          class={`flex flex-col justify-between rounded-2xl border p-8 transition-all duration-200 ${
+            idx < 3 ? "md:col-span-2" : "md:col-span-3"
+          } ${
+            item.featured
+              ? "border-[#3B82F6]/35 bg-[#1D222D]/70 hover:border-[#3B82F6]/60"
+              : "border-white/[0.08] bg-[#202126]/65 hover:border-white/[0.16] hover:bg-[#202126]"
+          }`}
+        >
+          <div>
+            <div class="flex items-center justify-between">
+              <span
+                class={`inline-flex items-center gap-2 font-mono text-xs font-medium ${
+                  item.featured ? "text-[#60A5FA]" : "text-[#3B82F6]"
+                }`}
+              >
+                {item.featured && (
+                  <span class="h-1.5 w-1.5 rounded-full bg-[#3B82F6]"></span>
+                )}
+                {item.tag}
+              </span>
+              {item.link && (
+                <a
+                  href={item.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="font-mono text-xs text-[#93C5FD] transition-colors hover:text-white"
+                >
+                  formal/ &rarr;
+                </a>
+              )}
+            </div>
+
+            <h3 class="mt-4 text-xl font-semibold tracking-[-0.02em] text-[#F4F5F7]">
+              {item.title}
+            </h3>
+            <p class="mt-3 text-sm leading-relaxed text-[#A1A6B3]">
+              {item.description}
+            </p>
+          </div>
+
+          <div class="mt-7 border-t border-white/[0.07] pt-4 font-mono text-xs text-[#6E7485]">
+            {item.codeHint}
+          </div>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>

@@ -8,4 +8,10 @@ __pycache__/
 !*.ddl.json
 !packaging/vcpkg/vcpkg.json
 !packaging/npm/package.json
+!website/package.json
+!website/tsconfig.json
+website/node_modules/
+website/dist/
+website/.astro/
+website/package-lock.json
 .DS_Store

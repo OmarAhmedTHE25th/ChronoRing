@@ -1,0 +1,278 @@
+---
+interface Snippet {
+  id: string;
+  label: string;
+  filename: string;
+  note: string;
+  code: string;
+}
+
+const snippets: Snippet[] = [
+  {
+    id: "pipeline",
+    label: "TelemetryPipeline",
+    filename: "daq_pipeline.cpp",
+    note: "Zero-allocation ingest → SIMD trigger → compressed mmap .crng sink",
+    code: `#include "chronoring/chronoring.hpp"
+#include <cstdio>
+
+int main() {
+    chronoring::PipelineConfig cfg;
+    cfg.output_path = "run_042.crng";
+    cfg.trigger.min_energy_mev = 10.0f;
+    cfg.trigger.max_abs_timing_ps = 120.0f;
+    cfg.enable_compression = true;          // stack-only LZ4 + CRC32C
+    cfg.projection_mask = chronoring::kColAll;
+
+    chronoring::TelemetryPipeline pipeline(cfg);
+    if (!pipeline.start()) return 1;
+
+    chronoring::EventFrame ev{};
+    ev.timestamp_ns  = 1000420ULL;
+    ev.sequence_id   = 1;
+    ev.detector_id   = 7;
+    ev.energy_mev    = 48.5f;
+    ev.timing_ps     = -18.0f;
+    ev.quality_flags = chronoring::kFlagValid;
+    ev.multiplicity  = 2;
+
+    pipeline.submit_wait(ev);
+    pipeline.stop();
+
+    const auto st = pipeline.stats();
+    std::printf("passed=%llu p99=%lluns\\n",
+                static_cast<unsigned long long>(st.passed_events),
+                static_cast<unsigned long long>(st.p99_ns));
+    return 0;
+}`,
+  },
+  {
+    id: "ring",
+    label: "SpscRingBuffer",
+    filename: "zero_copy_ring.cpp",
+    note: "In-place reserve/commit handoff with cached shadow indices",
+    code: `#include "chronoring/spsc_ring.hpp"
+
+void stream_detector_hit(
+    chronoring::SpscRingBuffer<chronoring::EventFrame, 4096>& ring,
+    double raw_adc) {
+    // Producer writes directly into the 64B cache-aligned ring slot
+    if (auto* slot = ring.try_reserve_push()) {
+        slot->timestamp_ns  = 4096000ULL;
+        slot->sequence_id   = 1024;
+        slot->energy_mev    = static_cast<float>(raw_adc * 1.25);
+        slot->quality_flags = chronoring::kFlagValid;
+        ring.commit_push();   // release fence publishes slot
+    }
+
+    // Consumer inspects in place without copying before releasing
+    if (const auto* frame = ring.try_peek()) {
+        if ((frame->quality_flags & chronoring::kFlagValid) != 0u) {
+            ring.consume_pop();
+        }
+    }
+}`,
+  },
+  {
+    id: "simd",
+    label: "SIMD SoA Trigger",
+    filename: "soa_avx2_filter.cpp",
+    note: "Direct planar SoA trigger evaluation without AoS conversion",
+    code: `#include "chronoring/soa_pipeline.hpp"
+#include <array>
+
+std::size_t filter_page_soa(const chronoring::ColumnarPage& in_page,
+                            chronoring::ColumnarPage& out_page) noexcept {
+    chronoring::TriggerConfig trig;
+    trig.min_energy_mev    = 5.0f;
+    trig.max_energy_mev    = 5000.0f;
+    trig.max_abs_timing_ps = 150.0f;
+    trig.min_multiplicity  = 2;
+
+    std::array<std::uint64_t, chronoring::kColumnarPageEvents / 64u> mask{};
+    const std::size_t kept = chronoring::evaluate_columnar_page(
+        in_page, trig, mask.data(), chronoring::SimdBackend::Auto);
+
+    return kept > 0
+        ? chronoring::compact_soa_page(in_page, mask.data(), out_page)
+        : 0;
+}`,
+  },
+];
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+const cppTokenPattern =
+  /(\/\/[^\n]*|^\s*#\s*[a-z]+|"(?:\\.|[^"\\])*"|\b(?:int|void|auto|const|constexpr|static_cast|return|if|noexcept|true|false|bool|double|float)\b|\b(?:chronoring|std|PipelineConfig|TelemetryPipeline|EventFrame|SpscRingBuffer|ColumnarPage|TriggerConfig|SimdBackend|size_t|uint64_t)\b|\b\d+(?:\.\d+)?(?:ULL|f|u)?\b)/gm;
+
+function highlightCpp(source: string): string {
+  let result = "";
+  let lastIndex = 0;
+  cppTokenPattern.lastIndex = 0;
+
+  let match: RegExpExecArray | null;
+  while ((match = cppTokenPattern.exec(source)) !== null) {
+    result += escapeHtml(source.slice(lastIndex, match.index));
+    const token = match[0];
+    let cls = "";
+    if (token.startsWith("//")) {
+      cls = "tok-cm";
+    } else if (token.trimStart().startsWith("#")) {
+      cls = "tok-pp";
+    } else if (token.startsWith('"')) {
+      cls = "tok-str";
+    } else if (/^\d/.test(token)) {
+      cls = "tok-num";
+    } else if (
+      /^(int|void|auto|const|constexpr|static_cast|return|if|noexcept|true|false|bool|double|float)$/.test(
+        token
+      )
+    ) {
+      cls = "tok-kw";
+    } else {
+      cls = "tok-ty";
+    }
+    result += `<span class="${cls}">${escapeHtml(token)}</span>`;
+    lastIndex = cppTokenPattern.lastIndex;
+  }
+
+  result += escapeHtml(source.slice(lastIndex));
+  return result;
+}
+---
+
+<section id="code" class="border-b border-white/[0.06] bg-[#131316] py-24 sm:py-32">
+  <div class="mx-auto max-w-6xl px-6 sm:px-8">
+    <div class="grid grid-cols-1 gap-12 lg:grid-cols-12 lg:gap-14">
+      <!-- Left intro -->
+      <div class="lg:col-span-4">
+        <p class="font-mono text-xs font-medium tracking-[0.14em] text-[#3B82F6] uppercase">
+          C++20 API
+        </p>
+        <h2 class="mt-4 text-3xl font-semibold tracking-[-0.03em] text-[#F4F5F7] sm:text-4xl">
+          Clean primitives. Zero hidden allocations.
+        </h2>
+        <p class="mt-5 text-base leading-relaxed text-[#A1A6B3]">
+          Drop directly into modern C++20 builds via CMake, or consume the stable C99/C89 ABI from Rust, Go, Julia, C#, Python, and MATLAB.
+        </p>
+
+        <div class="mt-8 space-y-3 border-t border-white/[0.08] pt-6 font-mono text-xs text-[#6E7485]">
+          <div class="flex items-center justify-between">
+            <span>Header entry</span>
+            <code class="text-[#D1D5DB]">chronoring/chronoring.hpp</code>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>Compiler standard</span>
+            <code class="text-[#D1D5DB]">-std=c++20 -Werror</code>
+          </div>
+          <div class="flex items-center justify-between">
+            <span>Build system</span>
+            <code class="text-[#D1D5DB]">CMake · vcpkg · Conan</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right interactive code frame -->
+      <div class="lg:col-span-8">
+        <div class="overflow-hidden rounded-2xl border border-white/[0.09] bg-[#19191C] shadow-2xl">
+          <!-- Tab bar & Copy action -->
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] bg-[#202126] px-4 py-3 sm:px-5">
+            <div class="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="ChronoRing C++ examples">
+              {snippets.map((s, idx) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={idx === 0 ? "true" : "false"}
+                  data-tab-target={s.id}
+                  class={`code-tab rounded-lg px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
+                    idx === 0
+                      ? "bg-[#3B82F6]/15 text-[#93C5FD] ring-1 ring-[#3B82F6]/40"
+                      : "text-[#A1A6B3] hover:bg-white/[0.05] hover:text-[#F4F5F7]"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+
+            <button
+              id="copy-code-btn"
+              type="button"
+              class="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 font-mono text-[11px] font-medium text-[#A1A6B3] transition-colors hover:border-white/20 hover:text-white"
+            >
+              <svg viewBox="0 0 20 20" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <rect x="7" y="7" width="9" height="9" rx="1.5" />
+                <path d="M4.5 13H4a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 4 2h8a1.5 1.5 0 0 1 1.5 1.5V4" />
+              </svg>
+              <span id="copy-code-label">Copy</span>
+            </button>
+          </div>
+
+          <!-- Code panels -->
+          {snippets.map((s, idx) => (
+            <div
+              data-tab-panel={s.id}
+              data-raw-code={s.code}
+              class={idx === 0 ? "code-panel block" : "code-panel hidden"}
+            >
+              <div class="flex items-center justify-between border-b border-white/[0.05] bg-[#16171A] px-5 py-2.5 font-mono text-[11px] text-[#6E7485]">
+                <span>{s.filename}</span>
+                <span class="hidden sm:inline">{s.note}</span>
+              </div>
+              <pre class="overflow-x-auto p-5 text-[13px] leading-[1.65] sm:p-6"><code set:html={highlightCpp(s.code)} /></pre>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const tabs = document.querySelectorAll<HTMLButtonElement>(".code-tab");
+  const panels = document.querySelectorAll<HTMLElement>(".code-panel");
+  const copyBtn = document.getElementById("copy-code-btn");
+  const copyLabel = document.getElementById("copy-code-label");
+
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.tabTarget;
+      if (!target) return;
+
+      tabs.forEach((t) => {
+        const active = t.dataset.tabTarget === target;
+        t.setAttribute("aria-selected", String(active));
+        t.className = active
+          ? "code-tab rounded-lg px-3 py-1.5 text-xs font-medium transition-colors duration-150 bg-[#3B82F6]/15 text-[#93C5FD] ring-1 ring-[#3B82F6]/40"
+          : "code-tab rounded-lg px-3 py-1.5 text-xs font-medium transition-colors duration-150 text-[#A1A6B3] hover:bg-white/[0.05] hover:text-[#F4F5F7]";
+      });
+
+      panels.forEach((p) => {
+        p.classList.toggle("hidden", p.dataset.tabPanel !== target);
+        p.classList.toggle("block", p.dataset.tabPanel === target);
+      });
+    });
+  });
+
+  if (copyBtn && copyLabel) {
+    copyBtn.addEventListener("click", async () => {
+      const visible = Array.from(panels).find((p) => !p.classList.contains("hidden"));
+      const raw = visible?.dataset.rawCode;
+      if (!raw) return;
+      try {
+        await navigator.clipboard.writeText(raw);
+        copyLabel.textContent = "Copied";
+        setTimeout(() => {
+          copyLabel.textContent = "Copy";
+        }, 1600);
+      } catch {
+        copyLabel.textContent = "Failed";
+      }
+    });
+  }
+</script>

@@ -1,0 +1,100 @@
+---
+const githubUrl = "https://github.com/OmarAhmedTHE25th/ChronoRing";
+
+const heroStats = [
+  {
+    value: "198.15 M",
+    unit: "items/s",
+    label: "SPSC Ring Throughput",
+    sub: "5.05 ns/op wait-free transfer",
+  },
+  {
+    value: "~4.9×",
+    unit: "faster",
+    label: "Cross-Thread Latency",
+    sub: "vs. mutex-guarded queue",
+  },
+  {
+    value: "422.20 M",
+    unit: "events/s",
+    label: "AVX2 SoA Trigger",
+    sub: "2.40× over scalar kernel",
+  },
+  {
+    value: "4.97",
+    unit: "GiB/s",
+    label: "Hardware CRC32C",
+    sub: "22.1× over software path",
+  },
+];
+---
+
+<section class="relative overflow-hidden border-b border-white/[0.06] pt-24 pb-20 sm:pt-36 sm:pb-28">
+  <!-- Subtle architectural grid and restrained electric-blue radial glow -->
+  <div class="hero-grid-bg pointer-events-none absolute inset-0" aria-hidden="true"></div>
+  <div
+    class="pointer-events-none absolute -top-40 left-1/2 h-[480px] w-[780px] -translate-x-1/2 rounded-full bg-[#3B82F6]/[0.09] blur-[130px]"
+    aria-hidden="true"
+  ></div>
+
+  <div class="relative mx-auto max-w-6xl px-6 sm:px-8">
+    <div class="max-w-4xl">
+      <div class="inline-flex items-center gap-2.5 rounded-full border border-white/[0.1] bg-[#202126]/90 px-3.5 py-1.5 text-xs font-medium tracking-wide text-[#A1A6B3]">
+        <span class="h-1.5 w-1.5 rounded-full bg-[#3B82F6]"></span>
+        <span>C++20 · Zero-Allocation · TLA+ &amp; Lean 4 Verified</span>
+      </div>
+
+      <h1 class="mt-8 text-5xl font-bold tracking-[-0.04em] text-[#F4F5F7] sm:text-7xl sm:leading-[1.03]">
+        ChronoRing
+      </h1>
+
+      <p class="mt-6 max-w-2xl text-xl leading-relaxed font-normal text-[#A1A6B3] sm:text-2xl sm:leading-[1.45]">
+        Wait-free telemetry transport, vectorized SIMD trigger filtering, and zero-copy columnar persistence built for high-rate scientific and physics DAQ pipelines.
+      </p>
+
+      <div class="mt-10 flex flex-wrap items-center gap-4">
+        <a
+          href={githubUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-2.5 rounded-full bg-[#3B82F6] px-7 py-3.5 text-sm font-semibold text-white shadow-[0_0_24px_rgba(59,130,246,0.28)] transition-all duration-200 hover:bg-[#2563EB] hover:shadow-[0_0_32px_rgba(59,130,246,0.42)]"
+        >
+          <svg viewBox="0 0 24 24" class="h-4 w-4 fill-current" aria-hidden="true">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
+          </svg>
+          <span>View on GitHub</span>
+        </a>
+
+        <a
+          href="#architecture"
+          class="inline-flex items-center gap-2 rounded-full border border-white/[0.14] bg-transparent px-7 py-3.5 text-sm font-semibold text-[#F4F5F7] transition-all duration-200 hover:border-white/30 hover:bg-white/[0.04]"
+        >
+          <span>Read the Design</span>
+          <svg viewBox="0 0 20 20" class="h-4 w-4 text-[#A1A6B3]" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10m-4-4l4 4-4 4" />
+          </svg>
+        </a>
+      </div>
+    </div>
+
+    <!-- Prominent telemetry strip -->
+    <div class="mt-20 rounded-2xl border border-white/[0.08] bg-[#202126]/75 backdrop-blur-sm">
+      <div class="grid grid-cols-1 divide-y divide-white/[0.07] sm:grid-cols-2 sm:divide-y-0 lg:grid-cols-4 lg:divide-x">
+        {heroStats.map((stat, idx) => (
+          <div
+            class={`p-6 sm:p-7 ${idx < 2 ? "sm:border-b sm:border-white/[0.07] lg:border-b-0" : ""} ${idx % 2 === 0 ? "sm:border-r sm:border-white/[0.07] lg:border-r-0" : ""}`}
+          >
+            <div class="flex items-baseline gap-2">
+              <span class="tabular-metrics text-3xl font-semibold tracking-tight text-[#F4F5F7] sm:text-[32px]">
+                {stat.value}
+              </span>
+              <span class="font-mono text-xs font-medium text-[#3B82F6]">{stat.unit}</span>
+            </div>
+            <p class="mt-2.5 text-sm font-medium text-[#D1D5DB]">{stat.label}</p>
+            <p class="mt-0.5 text-xs text-[#6E7485]">{stat.sub}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+</section>

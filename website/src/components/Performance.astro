@@ -1,0 +1,90 @@
+---
+const metrics = [
+  {
+    value: "198.15 M",
+    unit: "items/s",
+    title: "SPSC Ring Throughput",
+    sub: "5.05 ns/op sustained single-producer single-consumer push/pop with shadow head and tail caching.",
+    baseline: "Single-thread wait-free index handoff",
+    speedupLabel: "5.05 ns / item",
+    fillWidth: "92%",
+  },
+  {
+    value: "~4.9×",
+    unit: "faster",
+    title: "Cross-Thread vs. Mutex Queue",
+    sub: "Outperforms std::mutex + condition-variable queues under contention without kernel sleeps or lock handoff overhead.",
+    baseline: "Cross-core producer/consumer transfer",
+    speedupLabel: "Zero lock contention",
+    fillWidth: "82%",
+  },
+  {
+    value: "422.20 M",
+    unit: "events/s",
+    title: "SIMD SoA Trigger (AVX2)",
+    sub: "2.40× faster than scalar evaluation by streaming planar SoA float and flag columns directly into YMM registers.",
+    baseline: "2.40× speedup over scalar branch path",
+    speedupLabel: "8-wide AVX2 lanes",
+    fillWidth: "96%",
+  },
+  {
+    value: "4.97",
+    unit: "GiB/s",
+    title: "Hardware CRC32C Verification",
+    sub: "22.1× faster than table-driven software CRC32C via CPU _mm_crc32_u64 intrinsics over page headers and data.",
+    baseline: "22.1× speedup over software fallback",
+    speedupLabel: "Line-rate integrity",
+    fillWidth: "88%",
+  },
+];
+---
+
+<section id="performance" class="border-b border-white/[0.06] bg-[#131316] py-24 sm:py-32">
+  <div class="mx-auto max-w-6xl px-6 sm:px-8">
+    <div class="max-w-2xl">
+      <p class="font-mono text-xs font-medium tracking-[0.14em] text-[#3B82F6] uppercase">
+        Measured Performance
+      </p>
+      <h2 class="mt-4 text-3xl font-semibold tracking-[-0.03em] text-[#F4F5F7] sm:text-4xl">
+        Engineered for cache locality and instruction throughput.
+      </h2>
+      <p class="mt-4 text-base leading-relaxed text-[#A1A6B3]">
+        Benchmarked with Google Benchmark across lock-free concurrency primitives, SIMD trigger evaluation, and hardware-accelerated integrity checks.
+      </p>
+    </div>
+
+    <div class="mt-14 grid grid-cols-1 gap-6 md:grid-cols-2">
+      {metrics.map((m) => (
+        <article class="group flex flex-col justify-between rounded-2xl border border-white/[0.08] bg-[#1F2024] p-8 transition-all duration-200 hover:border-[#3B82F6]/35 hover:bg-[#23242A]">
+          <div>
+            <div class="flex items-center justify-between gap-4">
+              <span class="font-mono text-xs font-medium text-[#6E7485]">{m.baseline}</span>
+              <span class="rounded-full border border-[#3B82F6]/25 bg-[#3B82F6]/10 px-2.5 py-0.5 font-mono text-[11px] font-medium text-[#93C5FD]">
+                {m.speedupLabel}
+              </span>
+            </div>
+
+            <div class="mt-6 flex items-baseline gap-2.5">
+              <span class="tabular-metrics text-4xl font-bold tracking-tight text-[#F4F5F7] sm:text-5xl">
+                {m.value}
+              </span>
+              <span class="font-mono text-sm font-medium text-[#3B82F6]">{m.unit}</span>
+            </div>
+
+            <h3 class="mt-4 text-lg font-semibold text-[#F4F5F7]">{m.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-[#A1A6B3]">{m.sub}</p>
+          </div>
+
+          <div class="mt-8">
+            <div class="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.06]">
+              <div
+                class="h-full rounded-full bg-gradient-to-r from-[#2563EB] to-[#60A5FA] transition-all duration-300 group-hover:brightness-110"
+                style={`width: ${m.fillWidth};`}
+              ></div>
+            </div>
+          </div>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>
