@@ -47,8 +47,11 @@ endif()
 
 set(CHRONORING_CORE_SOURCES
     src/simd_trigger.cpp
+    src/trigger_jit.cpp
+    src/hw_offload.cpp
     src/shm_ring.cpp
     src/pcie_cxl_ring.cpp
+    src/rdma_cxl_ring.cpp
     src/columnar_sink.cpp
     src/crypto_integrity.cpp
     src/erasure_coding.cpp
@@ -142,10 +145,13 @@ if(CHRONORING_BUILD_TESTS)
     set(CHRONORING_TESTS
         test_spsc_ring
         test_mpsc_ring
+        test_mpmc_ring
         test_shm_ring
         test_pcie_cxl_ring
+        test_rdma_cxl_ring
         test_quantum_detector
         test_simd_trigger
+        test_trigger_jit
         test_columnar_sink
         test_crypto_integrity
         test_erasure_coding

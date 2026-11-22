@@ -45,10 +45,15 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `include/chronoring/event_frame.hpp` | 64-byte `EventFrame`, `ColumnarPageHeader`, `ColumnProjectionMask`, and 1024-event `ColumnarPage` (`57,408` bytes). |
 | `include/chronoring/spsc_ring.hpp` | Wait-free `SpscRingBuffer` (shadow caching, `std::span` batching, zero-copy `try_reserve_push`/`try_peek`) + `SpscFanOut`. |
 | `include/chronoring/mpsc_ring.hpp` | Vyukov lock-free `MpscRingBuffer` with adaptive spin/yield/`std::atomic::wait` (`push_wait`/`pop_wait`). |
+| `include/chronoring/mpmc_ring.hpp` | Lock-free `MpmcRingBuffer` and arbitrary M:N `RingTopologyRouter` (`Broadcast`, `RoundRobin`, `PredicateFiltered`). |
 | `include/chronoring/shm_ring.hpp` | Cross-process shared-memory ring (`shm_open`/`mmap` on POSIX, `CreateFileMapping` on Win32) + `ShmScopeGuard`. |
 | `include/chronoring/pcie_cxl_ring.hpp` | Direct PCIe BAR / VFIO / CXL.mem DAX zero-CPU FPGA DMA ring (`PcieCxlRing`, `MockFpgaDmaProducer`). |
+| `include/chronoring/rdma_cxl_ring.hpp` | Unified zero-copy distributed `FabricRingEndpoint` across SHM, CXL.mem, and one-sided RDMA (RoCEv2 / InfiniBand). |
 | `include/chronoring/quantum_detector.hpp` | Cryogenic & quantum sensor ingestion adapters (`SNSPD`, `TES`, `MKID`, `SQUID`, `IonTrapQubit`) and trigger presets. |
-| `include/chronoring/simd_trigger.hpp` | AVX2, SSE4.2, NEON, and scalar kernels, `diagnose_reject_reasons`, custom predicate hooks, and JSON config serialization. |
+| `include/chronoring/simd_trigger.hpp` | AVX-512, AVX2, SSE4.2, SVE2, NEON, RVV, WASM-SIMD128, and scalar kernels + diagnostics & JSON serialization. |
+| `include/chronoring/trigger_jit.hpp` | Custom trigger DSL compiler & 64-lane SIMD bytecode / native JIT evaluator (`compile_trigger_dsl`). |
+| `include/chronoring/hw_offload.hpp` | Hardware trigger offload router (`IoUring`, `Dpdk`, `CudaHipGpu`, `FpgaOpenCl`) with automatic CPU SIMD fallback. |
+| `include/chronoring/soa_pipeline.hpp` | Pure-SoA dataflow hot path (`SoaDataflowPipeline`, `SoaBatchBuilder`, `compact_soa_page`) with zero AoS conversion. |
 | `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (projection + optional LZ4 compression) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
 | `include/chronoring/crypto_integrity.hpp` | FIPS 180-4 SHA-256, `PageMerkleTree` inclusion proofs, and quantum-resistant WOTS+ hash signatures. |
 | `include/chronoring/erasure_coding.hpp` | Systematic GF(2^8) Cauchy Reed-Solomon encoder/reconstructor with per-shard CRC32C. |
