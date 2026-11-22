@@ -1,0 +1,8 @@
+[package]
+name = "chronoring"
+version = "1.2.0"
+edition = "2021"
+license = "MIT"
+description = "Rust FFI bindings to ChronoRing ultra-low-latency telemetry & columnar engine"
+
+[dependencies]
