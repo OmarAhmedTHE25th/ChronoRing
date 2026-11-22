@@ -25,7 +25,8 @@ const quickstartCommands: QuickstartCommand[] = [
   {
     id: "python",
     label: "Python",
-    command: "pip install chronoring",
+    command:
+      "cmake -B build -DCHRONORING_BUILD_SHARED=ON && cmake --build build -j && PYTHONPATH=python python3 python/examples/quickstart.py",
   },
   {
     id: "bench",
