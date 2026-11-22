@@ -45,14 +45,20 @@ elseif(CHRONORING_ENABLE_TSAN)
     endif()
 endif()
 
+set(CHRONORING_CORE_SOURCES
+    src/simd_trigger.cpp
+    src/shm_ring.cpp
+    src/pcie_cxl_ring.cpp
+    src/columnar_sink.cpp
+    src/crypto_integrity.cpp
+    src/erasure_coding.cpp
+    src/durable_store.cpp
+    src/tiered_storage.cpp
+    src/c_api.cpp
+)
+
 if(CHRONORING_BUILD_SHARED)
-    add_library(chronoring_core SHARED
-        src/simd_trigger.cpp
-        src/shm_ring.cpp
-        src/pcie_cxl_ring.cpp
-        src/columnar_sink.cpp
-        src/c_api.cpp
-    )
+    add_library(chronoring_core SHARED ${CHRONORING_CORE_SOURCES})
     target_compile_definitions(chronoring_core
         PRIVATE CHRONORING_SHARED_BUILD
         INTERFACE CHRONORING_SHARED_USE
@@ -61,13 +67,7 @@ if(CHRONORING_BUILD_SHARED)
         WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
 else()
-    add_library(chronoring_core STATIC
-        src/simd_trigger.cpp
-        src/shm_ring.cpp
-        src/pcie_cxl_ring.cpp
-        src/columnar_sink.cpp
-        src/c_api.cpp
-    )
+    add_library(chronoring_core STATIC ${CHRONORING_CORE_SOURCES})
 endif()
 
 add_library(ChronoRing::chronoring_core ALIAS chronoring_core)
@@ -147,6 +147,9 @@ if(CHRONORING_BUILD_TESTS)
         test_quantum_detector
         test_simd_trigger
         test_columnar_sink
+        test_crypto_integrity
+        test_erasure_coding
+        test_durable_storage
         test_c_api
     )
 

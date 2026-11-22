@@ -50,6 +50,10 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `include/chronoring/quantum_detector.hpp` | Cryogenic & quantum sensor ingestion adapters (`SNSPD`, `TES`, `MKID`, `SQUID`, `IonTrapQubit`) and trigger presets. |
 | `include/chronoring/simd_trigger.hpp` | AVX2, SSE4.2, NEON, and scalar kernels, `diagnose_reject_reasons`, custom predicate hooks, and JSON config serialization. |
 | `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (projection + optional LZ4 compression) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
+| `include/chronoring/crypto_integrity.hpp` | FIPS 180-4 SHA-256, `PageMerkleTree` inclusion proofs, and quantum-resistant WOTS+ hash signatures. |
+| `include/chronoring/erasure_coding.hpp` | Systematic GF(2^8) Cauchy Reed-Solomon encoder/reconstructor with per-shard CRC32C. |
+| `include/chronoring/durable_store.hpp` | ACID group-commit WAL (`DurableColumnarStore`), synchronous quorum replication, and time-travel PITR. |
+| `include/chronoring/tiered_storage.hpp` | Automatic NVMe → SSD → S3/MinIO/Ceph tiering (`TieredStorageManager`) & `GeoReplicatedBackup`. |
 | `include/chronoring/lz4_codec.hpp` | Zero-allocation LZ4-format block encoder/decoder using a fixed 16 KiB stack hash table. |
 | `include/chronoring/numa.hpp` | Portable CPU topology queries and core-pinning / NUMA policy helpers. |
 | `include/chronoring/latency_histogram.hpp` | Lock-free logarithmic HDR histogram (`< 0.8%` bucket width, `0 ns` to `> 270 s`). |

@@ -2,6 +2,9 @@
 
 #include "chronoring/c_api.h"
 #include "chronoring/columnar_sink.hpp"
+#include "chronoring/crypto_integrity.hpp"
+#include "chronoring/durable_store.hpp"
+#include "chronoring/erasure_coding.hpp"
 #include "chronoring/event_frame.hpp"
 #include "chronoring/latency_histogram.hpp"
 #include "chronoring/lz4_codec.hpp"
@@ -14,3 +17,4 @@
 #include "chronoring/simd_trigger.hpp"
 #include "chronoring/spsc_ring.hpp"
 #include "chronoring/status.hpp"
+#include "chronoring/tiered_storage.hpp"
