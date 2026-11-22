@@ -7,4 +7,5 @@ __pycache__/
 *.json
 !*.ddl.json
 !packaging/vcpkg/vcpkg.json
+!packaging/npm/package.json
 .DS_Store

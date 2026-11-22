@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-chronoring
+  labels:
+    app: chronoring
+spec:
+  selector:
+    matchLabels:
+      app: chronoring
+  template:
+    metadata:
+      labels:
+        app: chronoring
+    spec:
+      hostIPC: true
+      containers:
+        - name: chronoring-daq
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--demo", "1000000", "{{ .Values.pipeline.outputPath }}"]
+          ports:
+            - containerPort: {{ .Values.pipeline.dashboardPort }}
+              name: dashboard
+          resources:
+            requests:
+              cpu: "{{ .Values.resources.cpu }}"
+              memory: "{{ .Values.resources.memory }}"
+              hugepages-2Mi: "{{ .Values.resources.hugepages2Mi }}"
+            limits:
+              cpu: "{{ .Values.resources.cpu }}"
+              memory: "{{ .Values.resources.memory }}"
+              hugepages-2Mi: "{{ .Values.resources.hugepages2Mi }}"
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_NICE"]
+          volumeMounts:
+            - name: hugepage-2mi
+              mountPath: /dev/hugepages
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: hugepage-2mi
+          emptyDir:
+            medium: HugePages-2Mi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi

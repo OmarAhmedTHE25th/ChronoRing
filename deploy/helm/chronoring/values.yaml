@@ -1,0 +1,15 @@
+image:
+  repository: ghcr.io/omarahmedthe25th/chronoring
+  tag: "1.2.0"
+  pullPolicy: IfNotPresent
+
+resources:
+  cpu: "4"
+  memory: "1Gi"
+  hugepages2Mi: "512Mi"
+
+pipeline:
+  cpuCore: 2
+  enableCompression: true
+  outputPath: /var/lib/chronoring/live.crng
+  dashboardPort: 8080

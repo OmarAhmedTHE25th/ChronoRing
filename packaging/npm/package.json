@@ -1,0 +1,10 @@
+{
+  "name": "@chronoring/wasm",
+  "version": "1.2.0",
+  "description": "WebAssembly (SIMD128) telemetry trigger and columnar decoder build configuration for ChronoRing",
+  "license": "MIT",
+  "repository": "https://github.com/OmarAhmedTHE25th/ChronoRing",
+  "scripts": {
+    "build:wasm": "emcmake cmake -S ../.. -B build-wasm -DCMAKE_CXX_FLAGS='-msimd128' -DCHRONORING_BUILD_TESTS=OFF -DCHRONORING_BUILD_BENCHMARKS=OFF && cmake --build build-wasm"
+  }
+}

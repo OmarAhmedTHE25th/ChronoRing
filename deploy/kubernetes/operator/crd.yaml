@@ -1,0 +1,38 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: chronoringpipelines.daq.chronoring.io
+spec:
+  group: daq.chronoring.io
+  names:
+    kind: ChronoRingPipeline
+    listKind: ChronoRingPipelineList
+    plural: chronoringpipelines
+    singular: chronoringpipeline
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                cpuCore:
+                  type: integer
+                  default: 2
+                hugepages2Mi:
+                  type: string
+                  default: "512Mi"
+                enableCompression:
+                  type: boolean
+                  default: true
+                minEnergyMev:
+                  type: number
+                  default: 5.0
+                outputPath:
+                  type: string
+                  default: "/var/lib/chronoring/stream.crng"
