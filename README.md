@@ -69,6 +69,15 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `python/chronoring/__init__.py` | Thin zero-dependency `ctypes` Python bindings built atop `libchronoring_core`. |
 | `python/chronoring/live_stream.py` | Incremental live `.crng` columnar stream tailer (`LiveCrngStream`) with PyArrow/Polars/Jupyter adapters. |
 | `python/chronoring/dashboard.py` | Zero-dependency HTTP web dashboard & control plane (`/api/metrics`, `/metrics`, `/api/otlp`, `POST /api/config`). |
+| `include/chronoring/event_crypto.hpp` | Per-detector ChaCha20-Poly1305 AEAD (`DetectorKeyVault`), monotonic OPE ciphertexts, and searchable flag trapdoors (`evaluate_encrypted_trigger`). |
+| `include/chronoring/deterministic_replay.hpp` | Bit-identical multi-file offline replay (`DeterministicReplayEngine`) with SHA-256 `PageMerkleTree` transcript digest. |
+| `include/chronoring/raft_cluster.hpp` | Embedded Raft consensus (`RaftRingCluster`) forming a single logical distributed ring with quorum replication & failover. |
+| `include/chronoring/scientific_interop.hpp` | Zero-copy Apache Arrow C Data Interface (`export_columnar_page_to_arrow`) and HDF5 / Parquet / CERN ROOT schema export. |
+| `include/chronoring/c89_compat.h` | Pure ISO C89 fallback header (`cr89_u64_t`) compliant with `-std=c89 -pedantic -Werror`. |
+| `bindings/` | Multi-language FFI bindings for Rust, Go, Julia, C#, Java, LabVIEW, and MATLAB. |
+| `deploy/` | Kubernetes Operator & CRD, Helm DaemonSet (HugePages + CPU isolation), and HashiCorp Nomad job spec. |
+| `packaging/` | Multi-ecosystem recipes (`vcpkg`, `Conan`, `conda-forge`, `PyPI`, `npm`, `Homebrew`, `Spack`, `Nix`, `Guix`, `Fedora`). |
+| `tools/chronoring_selfhost.py` | Self-hosting specializing compiler generating constant-folded C++20 detector engines from `.ddl.json` specs. |
 
 ---
 
@@ -198,6 +207,9 @@ See [python/examples/quickstart.py](python/examples/quickstart.py) for a complet
 # Generate a complete C++20 DAQ pipeline from a Detector Description Language (.ddl.json) spec
 python3 tools/chronoring_ddl.py examples/detectors/cryo_snspd_array.ddl.json --out-dir build/gen_snspd
 python3 tools/chronoring_ddl.py examples/detectors/collider_calorimeter.ddl.json --out-dir build/gen_calorimeter
+
+# Self-host compile a specialized constant-folded C++20 detector engine
+python3 tools/chronoring_selfhost.py examples/detectors/cryo_snspd_array.ddl.json --out-dir build/selfhost_snspd
 
 # Launch real-time Web Dashboard & Jupyter/Polars live columnar monitor
 PYTHONPATH=python python3 -m chronoring.dashboard --host 127.0.0.1 --port 8080 --crng run.crng
