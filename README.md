@@ -6,6 +6,23 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 
 ---
 
+## Key Results
+
+| Metric | Value |
+|--------|-------|
+| SPSC ring throughput | **198.15 M items/s** (5.05 ns/op) |
+| Cross-thread vs mutex queue | **~4.9× faster** |
+| SIMD SoA trigger (AVX2) | **422.20 M events/s** (2.40× over scalar) |
+| Hardware CRC32C | **4.97 GiB/s** (22.1× over software) |
+
+Designed for high-rate detector telemetry: wait-free / lock-free rings, SIMD trigger filtering, zero-copy columnar persistence, and formal safety proofs (TLA+ / Lean 4).
+
+ChronoRing targets the same constraints found in high-energy physics data acquisition: millions of events per second, strict latency bounds, zero-allocation hot paths, and the need for both high throughput and verifiable integrity. The design deliberately mirrors patterns used in modern DAQ and online systems (lock-free buffering, columnar layouts, SIMD filtering, memory-mapped persistence).
+
+**Formal Verification**: TLA+ specifications and Lean 4 proofs for the core ring-buffer safety properties (no data races, linearizability of the SPSC/MPSC protocols).
+
+---
+
 ## Architecture
 
 ```text
