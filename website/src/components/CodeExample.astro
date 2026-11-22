@@ -7,7 +7,32 @@ interface Snippet {
   code: string;
 }
 
+interface QuickstartCommand {
+  id: string;
+  label: string;
+  command: string;
+}
+
 const includeUrl = "https://github.com/OmarAhmedTHE25th/ChronoRing/tree/main/include/chronoring";
+
+const quickstartCommands: QuickstartCommand[] = [
+  {
+    id: "cmake",
+    label: "CMake Demo",
+    command:
+      "cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && ./build/chronoring --demo 100000 run.crng",
+  },
+  {
+    id: "python",
+    label: "Python",
+    command: "pip install chronoring",
+  },
+  {
+    id: "bench",
+    label: "Benchmarks",
+    command: "./build/bench_chronoring --benchmark_min_time=0.5s",
+  },
+];
 
 const snippets: Snippet[] = [
   {
@@ -270,6 +295,56 @@ function highlightCpp(source: string): string {
       ))}
     </div>
 
+    <!-- Compact Quickstart / CLI install bar -->
+    <div class="mt-6 overflow-hidden rounded-xl border border-white/[0.12] bg-[#0B0E14]/95 shadow-xl backdrop-blur-md">
+      <div class="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] bg-[#080A0F] px-5 py-2.5 sm:px-6">
+        <div class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-wider text-[#9CA3AF] uppercase">
+          <span class="h-1.5 w-1.5 rounded-full bg-[#14B8A6]"></span>
+          <span>Quickstart CLI</span>
+        </div>
+
+        <div class="flex items-center gap-1.5" role="tablist" aria-label="Quickstart CLI commands">
+          {quickstartCommands.map((cmd, idx) => (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={idx === 0 ? "true" : "false"}
+              data-cli-id={cmd.id}
+              data-cli-command={cmd.command}
+              class={`cli-tab rounded-md px-2.5 py-1 font-mono text-[11px] font-medium whitespace-nowrap transition-colors duration-150 ${
+                idx === 0
+                  ? "bg-[#3B82F6]/20 text-[#93C5FD] ring-1 ring-[#3B82F6]/40"
+                  : "text-[#9CA3AF] hover:bg-white/[0.05] hover:text-white"
+              }`}
+            >
+              {cmd.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-4 px-5 py-3.5 sm:px-6">
+        <div class="flex min-w-0 items-center gap-3 overflow-x-auto">
+          <span class="shrink-0 font-mono text-sm font-semibold text-[#14B8A6] select-none">$</span>
+          <code id="cli-cmd-text" class="font-mono text-[13px] whitespace-nowrap text-white">
+            {quickstartCommands[0].command}
+          </code>
+        </div>
+
+        <button
+          id="copy-cli-btn"
+          type="button"
+          class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-white/[0.12] bg-white/[0.04] px-3.5 py-1.5 font-mono text-xs font-medium text-[#CBD5E1] transition-colors duration-150 hover:border-white/30 hover:text-white"
+        >
+          <svg viewBox="0 0 20 20" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <rect x="7" y="7" width="9" height="9" rx="1.5" />
+            <path d="M4.5 13H4a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 4 2h8a1.5 1.5 0 0 1 1.5 1.5V4" />
+          </svg>
+          <span id="copy-cli-label">Copy</span>
+        </button>
+      </div>
+    </div>
+
     <div class="mt-8">
       <a
         href={includeUrl}
@@ -289,6 +364,23 @@ function highlightCpp(source: string): string {
   const copyBtn = document.getElementById("copy-code-btn");
   const copyLabel = document.getElementById("copy-code-label");
   const headerLink = document.getElementById("active-header-link") as HTMLAnchorElement | null;
+
+  const cliTabs = document.querySelectorAll<HTMLButtonElement>(".cli-tab");
+  const cliCmdText = document.getElementById("cli-cmd-text");
+  const copyCliBtn = document.getElementById("copy-cli-btn");
+  const copyCliLabel = document.getElementById("copy-cli-label");
+
+  async function copyWithFeedback(text: string, labelEl: HTMLElement): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      labelEl.textContent = "Copied";
+      setTimeout(() => {
+        labelEl.textContent = "Copy";
+      }, 1600);
+    } catch {
+      labelEl.textContent = "Failed";
+    }
+  }
 
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -315,19 +407,37 @@ function highlightCpp(source: string): string {
   });
 
   if (copyBtn && copyLabel) {
-    copyBtn.addEventListener("click", async () => {
+    copyBtn.addEventListener("click", () => {
       const visible = Array.from(panels).find((p) => !p.classList.contains("hidden"));
       const raw = visible?.dataset.rawCode;
-      if (!raw) return;
-      try {
-        await navigator.clipboard.writeText(raw);
-        copyLabel.textContent = "Copied";
-        setTimeout(() => {
-          copyLabel.textContent = "Copy";
-        }, 1600);
-      } catch {
-        copyLabel.textContent = "Failed";
+      if (raw) void copyWithFeedback(raw, copyLabel);
+    });
+  }
+
+  cliTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const cmd = tab.dataset.cliCommand;
+      const id = tab.dataset.cliId;
+      if (!cmd || !id) return;
+
+      cliTabs.forEach((t) => {
+        const active = t.dataset.cliId === id;
+        t.setAttribute("aria-selected", String(active));
+        t.className = active
+          ? "cli-tab rounded-md px-2.5 py-1 font-mono text-[11px] font-medium whitespace-nowrap transition-colors duration-150 bg-[#3B82F6]/20 text-[#93C5FD] ring-1 ring-[#3B82F6]/40"
+          : "cli-tab rounded-md px-2.5 py-1 font-mono text-[11px] font-medium whitespace-nowrap transition-colors duration-150 text-[#9CA3AF] hover:bg-white/[0.05] hover:text-white";
+      });
+
+      if (cliCmdText) {
+        cliCmdText.textContent = cmd;
       }
+    });
+  });
+
+  if (copyCliBtn && copyCliLabel && cliCmdText) {
+    copyCliBtn.addEventListener("click", () => {
+      const cmd = cliCmdText.textContent?.trim();
+      if (cmd) void copyWithFeedback(cmd, copyCliLabel);
     });
   }
 </script>
