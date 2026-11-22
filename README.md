@@ -63,8 +63,12 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | `include/chronoring/numa.hpp` | Portable CPU topology queries and core-pinning / NUMA policy helpers. |
 | `include/chronoring/latency_histogram.hpp` | Lock-free logarithmic HDR histogram (`< 0.8%` bucket width, `0 ns` to `> 270 s`). |
 | `include/chronoring/pipeline.hpp` | End-to-end `TelemetryPipeline`, adaptive batching, back-pressure signals, durable dual-write, JSON config, and Prometheus exporter. |
+| `include/chronoring/observability.hpp` | Line-rate wait-free `LineRateTracer`, `ScopedLineRateSpan`, OTLP/JSON trace & metric exporters, and Prometheus metrics. |
+| `include/chronoring/control_plane.hpp` | Zero-drop double-buffered `LiveConfigStore` reload, Welford `StreamingAnomalyDetector`, and `PipelineAutoTuner`. |
 | `include/chronoring/c_api.h` | Pure C99/C11 ABI (`chronoring_spsc_*`, `chronoring_sink_*`, `chronoring_reader_*`, `chronoring_shm_*`, `chronoring_pipeline_*`). |
 | `python/chronoring/__init__.py` | Thin zero-dependency `ctypes` Python bindings built atop `libchronoring_core`. |
+| `python/chronoring/live_stream.py` | Incremental live `.crng` columnar stream tailer (`LiveCrngStream`) with PyArrow/Polars/Jupyter adapters. |
+| `python/chronoring/dashboard.py` | Zero-dependency HTTP web dashboard & control plane (`/api/metrics`, `/metrics`, `/api/otlp`, `POST /api/config`). |
 
 ---
 
@@ -194,6 +198,9 @@ See [python/examples/quickstart.py](python/examples/quickstart.py) for a complet
 # Generate a complete C++20 DAQ pipeline from a Detector Description Language (.ddl.json) spec
 python3 tools/chronoring_ddl.py examples/detectors/cryo_snspd_array.ddl.json --out-dir build/gen_snspd
 python3 tools/chronoring_ddl.py examples/detectors/collider_calorimeter.ddl.json --out-dir build/gen_calorimeter
+
+# Launch real-time Web Dashboard & Jupyter/Polars live columnar monitor
+PYTHONPATH=python python3 -m chronoring.dashboard --host 127.0.0.1 --port 8080 --crng run.crng
 ```
 
 ---

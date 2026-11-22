@@ -57,6 +57,8 @@ set(CHRONORING_CORE_SOURCES
     src/erasure_coding.cpp
     src/durable_store.cpp
     src/tiered_storage.cpp
+    src/observability.cpp
+    src/control_plane.cpp
     src/c_api.cpp
 )
 
@@ -156,6 +158,7 @@ if(CHRONORING_BUILD_TESTS)
         test_crypto_integrity
         test_erasure_coding
         test_durable_storage
+        test_observability
         test_c_api
     )
 

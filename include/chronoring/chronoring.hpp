@@ -2,6 +2,7 @@
 
 #include "chronoring/c_api.h"
 #include "chronoring/columnar_sink.hpp"
+#include "chronoring/control_plane.hpp"
 #include "chronoring/crypto_integrity.hpp"
 #include "chronoring/durable_store.hpp"
 #include "chronoring/erasure_coding.hpp"
@@ -12,6 +13,7 @@
 #include "chronoring/mpmc_ring.hpp"
 #include "chronoring/mpsc_ring.hpp"
 #include "chronoring/numa.hpp"
+#include "chronoring/observability.hpp"
 #include "chronoring/pcie_cxl_ring.hpp"
 #include "chronoring/pipeline.hpp"
 #include "chronoring/quantum_detector.hpp"
