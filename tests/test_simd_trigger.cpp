@@ -205,6 +205,14 @@ TEST(SimdTriggerTest, BitExactEquivalenceColumnarPageSoAAndCompaction) {
         EXPECT_EQ(mask_soa_sse, mask_aos);
         EXPECT_EQ(mask_soa_avx, mask_aos);
 
+        for (SimdBackend bk : {SimdBackend::AVX512, SimdBackend::SVE2,
+                               SimdBackend::RVV, SimdBackend::WasmSimd128}) {
+            std::vector<std::uint64_t> mask_bk(words, 0);
+            const std::size_t n_bk = evaluate_columnar_page(page, cfg, mask_bk.data(), bk);
+            EXPECT_EQ(n_bk, n_aos) << "Backend: " << backend_name(bk);
+            EXPECT_EQ(mask_bk, mask_aos) << "Backend: " << backend_name(bk);
+        }
+
         std::vector<EventFrame> compacted_aos(count);
         std::vector<EventFrame> compacted_soa(count);
         const std::size_t kept_aos =
@@ -282,6 +290,18 @@ TEST(SimdTriggerTest, RejectReasonDiagnosticsAndJsonRoundTrip) {
     EXPECT_EQ(parsed.forbidden_flags, cfg.forbidden_flags);
     EXPECT_EQ(parsed.min_multiplicity, cfg.min_multiplicity);
     EXPECT_EQ(parsed.required_trigger_mask, cfg.required_trigger_mask);
+}
+
+TEST(SimdTriggerTest, BackendNamesAndDetectionQueries) {
+    EXPECT_STREQ(backend_name(SimdBackend::AVX512), "AVX-512");
+    EXPECT_STREQ(backend_name(SimdBackend::SVE2), "SVE2");
+    EXPECT_STREQ(backend_name(SimdBackend::RVV), "RVV");
+    EXPECT_STREQ(backend_name(SimdBackend::WasmSimd128), "WASM-SIMD128");
+    (void)cpu_supports_avx512();
+    (void)cpu_supports_sve2();
+    (void)cpu_supports_rvv();
+    (void)cpu_supports_wasm_simd128();
+    EXPECT_NE(backend_name(active_backend(SimdBackend::Auto)), nullptr);
 }
 
 } // namespace chronoring::test

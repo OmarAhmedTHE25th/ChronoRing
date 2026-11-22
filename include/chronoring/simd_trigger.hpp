@@ -16,7 +16,11 @@ enum class SimdBackend {
     Scalar,
     SSE42,
     AVX2,
-    NEON
+    AVX512,
+    NEON,
+    SVE2,
+    RVV,
+    WasmSimd128
 };
 
 enum RejectReason : std::uint8_t {
@@ -46,9 +50,13 @@ struct TriggerConfig {
     void* custom_user_ctx{nullptr};
 };
 
+[[nodiscard]] bool cpu_supports_avx512() noexcept;
 [[nodiscard]] bool cpu_supports_avx2() noexcept;
 [[nodiscard]] bool cpu_supports_sse42() noexcept;
+[[nodiscard]] bool cpu_supports_sve2() noexcept;
 [[nodiscard]] bool cpu_supports_neon() noexcept;
+[[nodiscard]] bool cpu_supports_rvv() noexcept;
+[[nodiscard]] bool cpu_supports_wasm_simd128() noexcept;
 
 [[nodiscard]] SimdBackend active_backend(SimdBackend requested = SimdBackend::Auto) noexcept;
 [[nodiscard]] const char* backend_name(SimdBackend backend) noexcept;

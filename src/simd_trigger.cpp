@@ -20,17 +20,30 @@
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
 #define CHRONORING_ARM64 1
+#ifdef __ARM_FEATURE_SVE2
+#include <arm_sve.h>
+#define CHRONORING_SVE2 1
+#endif
+#elif defined(__riscv_vector)
+#include <riscv_vector.h>
+#define CHRONORING_RVV 1
+#elif defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+#define CHRONORING_WASM_SIMD128 1
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #if defined(__x86_64__) || defined(__i386__)
+#define CHRONORING_TARGET_AVX512 __attribute__((target("avx512f,avx512vl,avx512bw")))
 #define CHRONORING_TARGET_AVX2 __attribute__((target("avx2")))
 #define CHRONORING_TARGET_SSE42 __attribute__((target("sse4.2")))
 #else
+#define CHRONORING_TARGET_AVX512
 #define CHRONORING_TARGET_AVX2
 #define CHRONORING_TARGET_SSE42
 #endif
 #else
+#define CHRONORING_TARGET_AVX512
 #define CHRONORING_TARGET_AVX2
 #define CHRONORING_TARGET_SSE42
 #endif
@@ -68,6 +81,27 @@ bool detect_cpuid_avx2() noexcept {
     }
     __cpuidex(info, 7, 0);
     return (info[1] & (1 << 5)) != 0;
+}
+
+bool detect_cpuid_avx512() noexcept {
+    int info[4]{0, 0, 0, 0};
+    __cpuid(info, 0);
+    if (info[0] < 7) {
+        return false;
+    }
+    __cpuidex(info, 1, 0);
+    const bool has_osxsave = (info[2] & (1 << 27)) != 0;
+    const bool has_avx = (info[2] & (1 << 28)) != 0;
+    if (!has_osxsave || !has_avx) {
+        return false;
+    }
+    const unsigned long long xcr0 = _xgetbv(0);
+    if ((xcr0 & 0xE6ULL) != 0xE6ULL) {
+        return false;
+    }
+    __cpuidex(info, 7, 0);
+    constexpr int kAvx512Mask = (1 << 16) | (1 << 30) | (1 << 31); // F | BW | VL
+    return (info[1] & kAvx512Mask) == kAvx512Mask;
 }
 #endif
 
@@ -279,6 +313,56 @@ std::uint32_t eval_4_aos_sse42(const EventFrame* p, const TriggerConfig& cfg) no
 
     const __m128 combined = _mm_and_ps(fmask, _mm_castsi128_ps(imask));
     return filter_mask_with_custom(p, static_cast<std::uint32_t>(_mm_movemask_ps(combined)), cfg);
+}
+
+CHRONORING_TARGET_AVX512
+std::uint32_t eval_16_soa_avx512(const ColumnarPage& page, std::size_t idx,
+                                 const TriggerConfig& cfg) noexcept {
+    const __m512 e = _mm512_loadu_ps(page.energy_mev.data() + idx);
+    const __m512 t = _mm512_loadu_ps(page.timing_ps.data() + idx);
+    const __m512 pu = _mm512_loadu_ps(page.pileup_score.data() + idx);
+
+    const __m512 vmin_e = _mm512_set1_ps(cfg.min_energy_mev);
+    const __m512 vmax_e = _mm512_set1_ps(cfg.max_energy_mev);
+    const __m512 vmax_t = _mm512_set1_ps(cfg.max_abs_timing_ps);
+    const __m512 vmax_pu = _mm512_set1_ps(cfg.max_pileup_score);
+    const __m512i abs_mask = _mm512_set1_epi32(0x7FFFFFFF);
+    const __m512 abs_t = _mm512_castsi512_ps(
+        _mm512_and_si512(_mm512_castps_si512(t), abs_mask));
+
+    __mmask16 mask = _mm512_cmp_ps_mask(e, vmin_e, _CMP_GE_OQ);
+    mask = static_cast<__mmask16>(mask & _mm512_cmp_ps_mask(e, vmax_e, _CMP_LE_OQ));
+    mask = static_cast<__mmask16>(mask & _mm512_cmp_ps_mask(abs_t, vmax_t, _CMP_LE_OQ));
+    mask = static_cast<__mmask16>(mask & _mm512_cmp_ps_mask(pu, vmax_pu, _CMP_LE_OQ));
+
+    const __m512i qf = _mm512_loadu_si512(
+        reinterpret_cast<const void*>(page.quality_flags.data() + idx));
+    const __m256i mult16 = _mm256_loadu_si256(
+        reinterpret_cast<const __m256i*>(page.multiplicity.data() + idx));
+    const __m512i mult = _mm512_cvtepu16_epi32(mult16);
+
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i vreq = _mm512_set1_epi32(static_cast<int>(cfg.required_flags));
+    const __m512i vforb = _mm512_set1_epi32(static_cast<int>(cfg.forbidden_flags));
+    const __m512i vmin_mult = _mm512_set1_epi32(static_cast<int>(cfg.min_multiplicity));
+
+    mask = static_cast<__mmask16>(
+        mask & _mm512_cmpeq_epi32_mask(_mm512_and_si512(qf, vreq), vreq));
+    mask = static_cast<__mmask16>(
+        mask & _mm512_cmpeq_epi32_mask(_mm512_and_si512(qf, vforb), zero));
+    mask = static_cast<__mmask16>(
+        mask & _mm512_cmpge_epu32_mask(mult, vmin_mult));
+
+    if (cfg.required_trigger_mask != 0u) {
+        const __m256i tm16 = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(page.trigger_mask.data() + idx));
+        const __m512i tm = _mm512_cvtepu16_epi32(tm16);
+        const __m512i vreq_tm = _mm512_set1_epi32(static_cast<int>(cfg.required_trigger_mask));
+        mask = static_cast<__mmask16>(
+            mask & _mm512_cmpneq_epi32_mask(_mm512_and_si512(tm, vreq_tm), zero));
+    }
+
+    return filter_soa_mask_with_custom(page, idx, static_cast<std::uint32_t>(mask), cfg);
 }
 
 CHRONORING_TARGET_AVX2
@@ -533,6 +617,23 @@ bool parse_uint_field(std::string_view json, std::string_view key, UInt& out) no
 
 } // namespace
 
+bool cpu_supports_avx512() noexcept {
+#if defined(_MSC_VER) && defined(CHRONORING_X86)
+    static const bool supported = detect_cpuid_avx512();
+    return supported;
+#elif (defined(__GNUC__) || defined(__clang__)) && defined(CHRONORING_X86)
+    static const bool supported = []() noexcept {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("avx512f") != 0 &&
+               __builtin_cpu_supports("avx512vl") != 0 &&
+               __builtin_cpu_supports("avx512bw") != 0;
+    }();
+    return supported;
+#else
+    return false;
+#endif
+}
+
 bool cpu_supports_avx2() noexcept {
 #if defined(_MSC_VER) && defined(CHRONORING_X86)
     static const bool supported = detect_cpuid_avx2();
@@ -563,8 +664,32 @@ bool cpu_supports_sse42() noexcept {
 #endif
 }
 
+bool cpu_supports_sve2() noexcept {
+#ifdef CHRONORING_SVE2
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool cpu_supports_neon() noexcept {
 #ifdef CHRONORING_ARM64
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool cpu_supports_rvv() noexcept {
+#ifdef CHRONORING_RVV
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool cpu_supports_wasm_simd128() noexcept {
+#ifdef CHRONORING_WASM_SIMD128
     return true;
 #else
     return false;
@@ -575,6 +700,12 @@ SimdBackend active_backend(SimdBackend requested) noexcept {
     switch (requested) {
     case SimdBackend::Scalar:
         return SimdBackend::Scalar;
+    case SimdBackend::AVX512:
+        if (cpu_supports_avx512()) {
+            return SimdBackend::AVX512;
+        }
+        return cpu_supports_avx2() ? SimdBackend::AVX2
+                                   : (cpu_supports_sse42() ? SimdBackend::SSE42 : SimdBackend::Scalar);
     case SimdBackend::AVX2:
         if (cpu_supports_avx2()) {
             return SimdBackend::AVX2;
@@ -582,18 +713,39 @@ SimdBackend active_backend(SimdBackend requested) noexcept {
         return cpu_supports_sse42() ? SimdBackend::SSE42 : SimdBackend::Scalar;
     case SimdBackend::SSE42:
         return cpu_supports_sse42() ? SimdBackend::SSE42 : SimdBackend::Scalar;
+    case SimdBackend::SVE2:
+        if (cpu_supports_sve2()) {
+            return SimdBackend::SVE2;
+        }
+        return cpu_supports_neon() ? SimdBackend::NEON : SimdBackend::Scalar;
     case SimdBackend::NEON:
         return cpu_supports_neon() ? SimdBackend::NEON : SimdBackend::Scalar;
+    case SimdBackend::RVV:
+        return cpu_supports_rvv() ? SimdBackend::RVV : SimdBackend::Scalar;
+    case SimdBackend::WasmSimd128:
+        return cpu_supports_wasm_simd128() ? SimdBackend::WasmSimd128 : SimdBackend::Scalar;
     case SimdBackend::Auto:
     default:
+        if (cpu_supports_avx512()) {
+            return SimdBackend::AVX512;
+        }
         if (cpu_supports_avx2()) {
             return SimdBackend::AVX2;
         }
         if (cpu_supports_sse42()) {
             return SimdBackend::SSE42;
         }
+        if (cpu_supports_sve2()) {
+            return SimdBackend::SVE2;
+        }
         if (cpu_supports_neon()) {
             return SimdBackend::NEON;
+        }
+        if (cpu_supports_rvv()) {
+            return SimdBackend::RVV;
+        }
+        if (cpu_supports_wasm_simd128()) {
+            return SimdBackend::WasmSimd128;
         }
         return SimdBackend::Scalar;
     }
@@ -609,8 +761,16 @@ const char* backend_name(SimdBackend backend) noexcept {
         return "SSE4.2";
     case SimdBackend::AVX2:
         return "AVX2";
+    case SimdBackend::AVX512:
+        return "AVX-512";
+    case SimdBackend::SVE2:
+        return "SVE2";
     case SimdBackend::NEON:
         return "NEON";
+    case SimdBackend::RVV:
+        return "RVV";
+    case SimdBackend::WasmSimd128:
+        return "WASM-SIMD128";
     default:
         return "Unknown";
     }
@@ -767,12 +927,16 @@ std::size_t filter_events(const EventFrame* in, std::size_t count,
                           const TriggerConfig& cfg, EventFrame* out,
                           SimdBackend backend) noexcept {
     switch (active_backend(backend)) {
+    case SimdBackend::AVX512:
     case SimdBackend::AVX2:
         return filter_events_avx2(in, count, cfg, out);
     case SimdBackend::SSE42:
         return filter_events_sse42(in, count, cfg, out);
+    case SimdBackend::SVE2:
     case SimdBackend::NEON:
         return filter_events_neon(in, count, cfg, out);
+    case SimdBackend::RVV:
+    case SimdBackend::WasmSimd128:
     case SimdBackend::Scalar:
     case SimdBackend::Auto:
     default:
@@ -1048,17 +1212,213 @@ std::size_t evaluate_columnar_page_neon(const ColumnarPage& page,
 #endif
 }
 
+std::size_t evaluate_columnar_page_avx512(const ColumnarPage& page,
+                                           const TriggerConfig& cfg,
+                                           std::uint64_t* out_bitmask_words) noexcept {
+#ifdef CHRONORING_X86
+    if (!cpu_supports_avx512()) {
+        return evaluate_columnar_page_avx2(page, cfg, out_bitmask_words);
+    }
+    const std::size_t n =
+        std::min<std::size_t>(page.header.event_count, kColumnarPageEvents);
+    if (n == 0) {
+        return 0;
+    }
+    zero_bitmask_words(out_bitmask_words, n);
+    std::size_t passed = 0;
+    std::size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        const std::uint32_t mask = eval_16_soa_avx512(page, i, cfg);
+        passed += static_cast<std::size_t>(std::popcount(mask));
+        if (out_bitmask_words != nullptr && mask != 0u) {
+            out_bitmask_words[i >> 6] |=
+                (static_cast<std::uint64_t>(mask) << (i & 63u));
+        }
+    }
+    for (; i < n; ++i) {
+        if (evaluate_columnar_one(page, i, cfg)) {
+            if (out_bitmask_words != nullptr) {
+                out_bitmask_words[i >> 6] |= (std::uint64_t{1} << (i & 63u));
+            }
+            ++passed;
+        }
+    }
+    return passed;
+#else
+    return evaluate_columnar_page_scalar(page, cfg, out_bitmask_words);
+#endif
+}
+
+std::size_t evaluate_columnar_page_sve2(const ColumnarPage& page,
+                                         const TriggerConfig& cfg,
+                                         std::uint64_t* out_bitmask_words) noexcept {
+#ifdef CHRONORING_SVE2
+    const std::size_t n =
+        std::min<std::size_t>(page.header.event_count, kColumnarPageEvents);
+    if (n == 0) {
+        return 0;
+    }
+    zero_bitmask_words(out_bitmask_words, n);
+    std::size_t passed = 0;
+    const std::size_t vl = svcntw();
+    for (std::size_t i = 0; i < n; i += vl) {
+        const svbool_t pg = svwhilelt_b32(i, n);
+        const svfloat32_t e = svld1_f32(pg, page.energy_mev.data() + i);
+        const svfloat32_t t = svabs_f32_x(pg, svld1_f32(pg, page.timing_ps.data() + i));
+        const svfloat32_t pu = svld1_f32(pg, page.pileup_score.data() + i);
+        svbool_t ok = svcmpge_n_f32(pg, e, cfg.min_energy_mev);
+        ok = svcmple_n_f32(ok, e, cfg.max_energy_mev);
+        ok = svcmple_n_f32(ok, t, cfg.max_abs_timing_ps);
+        ok = svcmple_n_f32(ok, pu, cfg.max_pileup_score);
+        const svuint32_t qf = svld1_u32(pg, page.quality_flags.data() + i);
+        const svuint32_t mult = svld1uh_u32(pg, page.multiplicity.data() + i);
+        ok = svcmpeq_n_u32(ok, svand_n_u32_z(pg, qf, cfg.required_flags), cfg.required_flags);
+        ok = svcmpeq_n_u32(ok, svand_n_u32_z(pg, qf, cfg.forbidden_flags), 0u);
+        ok = svcmpge_n_u32(ok, mult, cfg.min_multiplicity);
+        if (cfg.required_trigger_mask != 0u) {
+            const svuint32_t tm = svld1uh_u32(pg, page.trigger_mask.data() + i);
+            ok = svcmpne_n_u32(ok, svand_n_u32_z(pg, tm, cfg.required_trigger_mask), 0u);
+        }
+        const std::size_t lane_lim = std::min(vl, n - i);
+        for (std::size_t l = 0; l < lane_lim; ++l) {
+            if (svptest_any(pg, svand_b_z(pg, ok, svwhilelt_b32(l, l + 1))) &&
+                (cfg.custom_predicate == nullptr ||
+                 cfg.custom_predicate(extract_aos_frame(page, i + l), cfg.custom_user_ctx))) {
+                if (out_bitmask_words != nullptr) {
+                    out_bitmask_words[(i + l) >> 6] |= (std::uint64_t{1} << ((i + l) & 63u));
+                }
+                ++passed;
+            }
+        }
+    }
+    return passed;
+#else
+    return evaluate_columnar_page_neon(page, cfg, out_bitmask_words);
+#endif
+}
+
+std::size_t evaluate_columnar_page_rvv(const ColumnarPage& page,
+                                        const TriggerConfig& cfg,
+                                        std::uint64_t* out_bitmask_words) noexcept {
+#ifdef CHRONORING_RVV
+    const std::size_t n =
+        std::min<std::size_t>(page.header.event_count, kColumnarPageEvents);
+    if (n == 0) {
+        return 0;
+    }
+    zero_bitmask_words(out_bitmask_words, n);
+    std::size_t passed = 0;
+    for (std::size_t i = 0; i < n;) {
+        const std::size_t vl = __riscv_vsetvl_e32m1(n - i);
+        const vfloat32m1_t e = __riscv_vle32_v_f32m1(page.energy_mev.data() + i, vl);
+        const vfloat32m1_t t = __riscv_vfabs_v_f32m1(
+            __riscv_vle32_v_f32m1(page.timing_ps.data() + i, vl), vl);
+        const vfloat32m1_t pu = __riscv_vle32_v_f32m1(page.pileup_score.data() + i, vl);
+        vbool32_t ok = __riscv_vmfge_vf_f32m1_b32(e, cfg.min_energy_mev, vl);
+        ok = __riscv_vmand_mm_b32(ok, __riscv_vmfle_vf_f32m1_b32(e, cfg.max_energy_mev, vl), vl);
+        ok = __riscv_vmand_mm_b32(ok, __riscv_vmfle_vf_f32m1_b32(t, cfg.max_abs_timing_ps, vl), vl);
+        ok = __riscv_vmand_mm_b32(ok, __riscv_vmfle_vf_f32m1_b32(pu, cfg.max_pileup_score, vl), vl);
+        const vuint32m1_t qf = __riscv_vle32_v_u32m1(page.quality_flags.data() + i, vl);
+        const vuint32m1_t mult = __riscv_vwcvtu_x_x_v_u32m1(
+            __riscv_vle16_v_u16mf2(page.multiplicity.data() + i, vl), vl);
+        ok = __riscv_vmand_mm_b32(
+            ok, __riscv_vmseq_vx_u32m1_b32(__riscv_vand_vx_u32m1(qf, cfg.required_flags, vl),
+                                           cfg.required_flags, vl), vl);
+        ok = __riscv_vmand_mm_b32(
+            ok, __riscv_vmseq_vx_u32m1_b32(__riscv_vand_vx_u32m1(qf, cfg.forbidden_flags, vl),
+                                           0u, vl), vl);
+        ok = __riscv_vmand_mm_b32(
+            ok, __riscv_vmsgeu_vx_u32m1_b32(mult, cfg.min_multiplicity, vl), vl);
+        if (cfg.required_trigger_mask != 0u) {
+            const vuint32m1_t tm = __riscv_vwcvtu_x_x_v_u32m1(
+                __riscv_vle16_v_u16mf2(page.trigger_mask.data() + i, vl), vl);
+            ok = __riscv_vmand_mm_b32(
+                ok, __riscv_vmsne_vx_u32m1_b32(
+                        __riscv_vand_vx_u32m1(tm, cfg.required_trigger_mask, vl), 0u, vl), vl);
+        }
+        const unsigned long cnt = __riscv_vcpop_m_b32(ok, vl);
+        if (cnt > 0) {
+            for (std::size_t l = 0; l < vl; ++l) {
+                if (evaluate_columnar_one(page, i + l, cfg)) {
+                    if (out_bitmask_words != nullptr) {
+                        out_bitmask_words[(i + l) >> 6] |= (std::uint64_t{1} << ((i + l) & 63u));
+                    }
+                    ++passed;
+                }
+            }
+        }
+        i += vl;
+    }
+    return passed;
+#else
+    return evaluate_columnar_page_scalar(page, cfg, out_bitmask_words);
+#endif
+}
+
+std::size_t evaluate_columnar_page_wasm_simd128(const ColumnarPage& page,
+                                                 const TriggerConfig& cfg,
+                                                 std::uint64_t* out_bitmask_words) noexcept {
+#ifdef CHRONORING_WASM_SIMD128
+    const std::size_t n =
+        std::min<std::size_t>(page.header.event_count, kColumnarPageEvents);
+    if (n == 0) {
+        return 0;
+    }
+    zero_bitmask_words(out_bitmask_words, n);
+    std::size_t passed = 0;
+    std::size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        const v128_t e = wasm_v128_load(page.energy_mev.data() + i);
+        const v128_t t = wasm_f32x4_abs(wasm_v128_load(page.timing_ps.data() + i));
+        const v128_t pu = wasm_v128_load(page.pileup_score.data() + i);
+        v128_t m = wasm_v128_and(
+            wasm_f32x4_ge(e, wasm_f32x4_splat(cfg.min_energy_mev)),
+            wasm_f32x4_le(e, wasm_f32x4_splat(cfg.max_energy_mev)));
+        m = wasm_v128_and(m, wasm_f32x4_le(t, wasm_f32x4_splat(cfg.max_abs_timing_ps)));
+        m = wasm_v128_and(m, wasm_f32x4_le(pu, wasm_f32x4_splat(cfg.max_pileup_score)));
+        const std::uint32_t fbits = static_cast<std::uint32_t>(wasm_i32x4_bitmask(m));
+        for (std::size_t l = 0; l < 4; ++l) {
+            if ((fbits & (1u << l)) != 0u && evaluate_columnar_one(page, i + l, cfg)) {
+                if (out_bitmask_words != nullptr) {
+                    out_bitmask_words[(i + l) >> 6] |= (std::uint64_t{1} << ((i + l) & 63u));
+                }
+                ++passed;
+            }
+        }
+    }
+    for (; i < n; ++i) {
+        if (evaluate_columnar_one(page, i, cfg)) {
+            if (out_bitmask_words != nullptr) {
+                out_bitmask_words[i >> 6] |= (std::uint64_t{1} << (i & 63u));
+            }
+            ++passed;
+        }
+    }
+    return passed;
+#else
+    return evaluate_columnar_page_scalar(page, cfg, out_bitmask_words);
+#endif
+}
+
 std::size_t evaluate_columnar_page(const ColumnarPage& page,
                                    const TriggerConfig& cfg,
                                    std::uint64_t* out_bitmask_words,
                                    SimdBackend backend) noexcept {
     switch (active_backend(backend)) {
+    case SimdBackend::AVX512:
+        return evaluate_columnar_page_avx512(page, cfg, out_bitmask_words);
     case SimdBackend::AVX2:
         return evaluate_columnar_page_avx2(page, cfg, out_bitmask_words);
     case SimdBackend::SSE42:
         return evaluate_columnar_page_sse42(page, cfg, out_bitmask_words);
+    case SimdBackend::SVE2:
+        return evaluate_columnar_page_sve2(page, cfg, out_bitmask_words);
     case SimdBackend::NEON:
         return evaluate_columnar_page_neon(page, cfg, out_bitmask_words);
+    case SimdBackend::RVV:
+        return evaluate_columnar_page_rvv(page, cfg, out_bitmask_words);
+    case SimdBackend::WasmSimd128:
+        return evaluate_columnar_page_wasm_simd128(page, cfg, out_bitmask_words);
     case SimdBackend::Scalar:
     case SimdBackend::Auto:
     default:
