@@ -1,0 +1,27 @@
+{
+  "detector": {
+    "name": "collider_calorimeter",
+    "kind": "Calorimeter",
+    "channels": 512
+  },
+  "transport": {
+    "kind": "pcie_cxl",
+    "ring_capacity": 1024,
+    "cpu_core": -1
+  },
+  "trigger": {
+    "min_energy_mev": 10.0,
+    "max_energy_mev": 15000.0,
+    "max_abs_timing_ps": 100.0,
+    "max_pileup_score": 0.35,
+    "min_multiplicity": 1
+  },
+  "persistence": {
+    "output_path": "collider_calorimeter.crng",
+    "enable_compression": true,
+    "projection_mask": "chronoring::kColAll"
+  },
+  "observability": {
+    "prometheus": true
+  }
+}
