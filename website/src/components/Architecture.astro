@@ -1,168 +1,172 @@
 ---
-const stages = [
-  {
-    step: "01",
-    title: "Ingestion",
-    spec: "64 B EventFrame",
-    body: "Detector front-ends push fixed 64-byte cache-aligned frames or stage events directly in Structure-of-Arrays pages with zero heap allocation.",
-  },
-  {
-    step: "02",
-    title: "Lock-Free Ring",
-    spec: "SPSC · MPSC · SHM",
-    body: "Wait-free single-producer rings cache shadow head/tail cursors to avoid cross-core cache invalidation; Vyukov MPSC and shared-memory IPC scale across threads and processes.",
-  },
-  {
-    step: "03",
-    title: "SIMD Trigger",
-    spec: "AVX2 · AVX-512 · NEON",
-    body: "Vectorized trigger kernels evaluate energy, timing, pileup, and flag predicates across 8–16 events per cycle, producing compact 64-bit pass bitmasks.",
-  },
-  {
-    step: "04",
-    title: "Columnar Sink",
-    spec: "57,408 B mmap + CRC32C",
-    body: "Selected events transpose into page-aligned .crng columnar blocks with optional stack-only LZ4 compression and hardware CRC32C checksums.",
-  },
-];
-
 const designDocUrl =
   "https://github.com/OmarAhmedTHE25th/ChronoRing/blob/main/docs/DESIGN.md";
+
+const stages = [
+  {
+    step: "01 · Ingestion",
+    title: "64 B Edge Frames",
+    text: "Fixed cache-line EventFrames or direct SoA columns populated via zero-copy reserve/commit.",
+  },
+  {
+    step: "02 · Transport",
+    title: "Lock-Free Rings",
+    text: "Shadow-cached SPSC, Vyukov MPSC, and cross-process SHM rings synchronized via acquire/release.",
+  },
+  {
+    step: "03 · Filtering",
+    title: "SIMD SoA Triggers",
+    text: "Runtime-dispatched AVX-512, AVX2, and NEON kernels emit packed 64-bit event pass bitmasks.",
+  },
+  {
+    step: "04 · Persistence",
+    title: "Columnar .crng Sink",
+    text: "57,408 B memory-mapped SoA pages with optional stack-only LZ4 and hardware CRC32C.",
+  },
+];
 ---
 
-<section id="architecture" class="border-b border-white/[0.06] bg-[#19191C] py-24 sm:py-32">
+<section id="architecture" class="border-t border-white/[0.06] bg-[#131720] py-24 sm:py-32">
   <div class="mx-auto max-w-6xl px-6 sm:px-8">
-    <div class="flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
-      <div class="max-w-2xl">
+    <!-- Asymmetric Kotlin-style diagram split -->
+    <div class="grid grid-cols-1 items-center gap-12 lg:grid-cols-12 lg:gap-12">
+      <!-- Left: Bold copy + pill CTA -->
+      <div class="lg:col-span-5">
         <p class="font-mono text-xs font-medium tracking-[0.14em] text-[#3B82F6] uppercase">
-          Architecture Overview
+          Architecture
         </p>
-        <h2 class="mt-4 text-3xl font-semibold tracking-[-0.03em] text-[#F4F5F7] sm:text-4xl">
-          Deterministic dataflow from sensor edge to disk.
+        <h2 class="mt-3 text-3xl font-bold tracking-[-0.03em] text-white sm:text-[40px] sm:leading-[1.12]">
+          Zero-copy pipeline from edge to disk.
         </h2>
+        <p class="mt-5 text-base leading-[1.65] text-[#A1A6B3]">
+          Frames stream from front-end links into cache-aligned rings, pass directly through vectorized Structure-of-Arrays triggers without scalar unpacking, and flush into memory-mapped columnar blocks.
+        </p>
+        <div class="mt-8">
+          <a
+            href={designDocUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-semibold text-[#0B0D12] transition-colors duration-200 hover:bg-[#E2E8F0]"
+          >
+            <span>Read Architecture Spec</span>
+            <svg viewBox="0 0 20 20" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10m-4-4l4 4-4 4" />
+            </svg>
+          </a>
+        </div>
       </div>
-      <a
-        href={designDocUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="inline-flex items-center gap-2 text-sm font-medium text-[#A1A6B3] transition-colors hover:text-[#F4F5F7]"
-      >
-        <span>Full architecture specification</span>
-        <svg viewBox="0 0 20 20" class="h-4 w-4 text-[#3B82F6]" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10m-4-4l4 4-4 4" />
-        </svg>
-      </a>
+
+      <!-- Right: Symmetric orthogonal SVG system diagram -->
+      <div class="lg:col-span-7">
+        <div class="rounded-2xl border border-white/[0.09] bg-[#0B0E14] p-6 shadow-2xl sm:p-8">
+          <svg
+            viewBox="0 0 640 340"
+            class="h-auto w-full"
+            fill="none"
+            role="img"
+            aria-label="ChronoRing Pipeline Diagram: Detector Ingestion into Lock-Free Ring Buffer into SIMD Vectorized Trigger Engine branching into Columnar .crng, Arrow and HDF5, HDR Latency, and Dual-Write WAL"
+          >
+            <defs>
+              <linearGradient id="arch-node-blue" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#2563EB" />
+                <stop offset="100%" stop-color="#1D4ED8" />
+              </linearGradient>
+              <linearGradient id="arch-node-teal" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#0284C7" />
+                <stop offset="100%" stop-color="#0D9488" />
+              </linearGradient>
+              <marker id="arrow-muted" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 1 2 L 8 5 L 1 8 z" fill="#64748B" />
+              </marker>
+              <marker id="arrow-accent" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 1 2 L 8 5 L 1 8 z" fill="#38BDF8" />
+              </marker>
+            </defs>
+
+            <!-- Tier 1: Ingestion (x=190, w=260, center=320) -->
+            <g>
+              <rect x="190" y="16" width="260" height="48" rx="10" fill="url(#arch-node-blue)" />
+              <text x="320" y="37" text-anchor="middle" fill="#FFFFFF" font-family="Inter, sans-serif" font-size="13" font-weight="600">
+                Detector Ingestion
+              </text>
+              <text x="320" y="53" text-anchor="middle" fill="#DBEAFE" font-family="JetBrains Mono, monospace" font-size="10.5">
+                64 B EventFrame · Direct SoA
+              </text>
+            </g>
+
+            <!-- Connector 1 -> 2 -->
+            <line x1="320" y1="64" x2="320" y2="96" stroke="#38BDF8" stroke-width="1.6" marker-end="url(#arrow-accent)" />
+
+            <!-- Tier 2: Lock-Free Ring (x=170, w=300, center=320) -->
+            <g>
+              <rect x="170" y="102" width="300" height="50" rx="10" fill="#182235" stroke="#3B82F6" stroke-width="1.4" />
+              <text x="320" y="124" text-anchor="middle" fill="#F8FAFC" font-family="Inter, sans-serif" font-size="13" font-weight="600">
+                Lock-Free Ring Buffer
+              </text>
+              <text x="320" y="141" text-anchor="middle" fill="#93C5FD" font-family="JetBrains Mono, monospace" font-size="10.5">
+                SPSC · Vyukov MPSC · POSIX/Win32 SHM
+              </text>
+            </g>
+
+            <!-- Connector 2 -> 3 -->
+            <line x1="320" y1="152" x2="320" y2="182" stroke="#38BDF8" stroke-width="1.6" marker-end="url(#arrow-accent)" />
+
+            <!-- Tier 3: SIMD Trigger (x=150, w=340, center=320) -->
+            <g>
+              <rect x="150" y="188" width="340" height="52" rx="10" fill="url(#arch-node-teal)" />
+              <text x="320" y="211" text-anchor="middle" fill="#FFFFFF" font-family="Inter, sans-serif" font-size="13.5" font-weight="600">
+                SIMD Vectorized Trigger Engine
+              </text>
+              <text x="320" y="228" text-anchor="middle" fill="#ECFEFF" font-family="JetBrains Mono, monospace" font-size="10.5">
+                AVX-512 · AVX2 · NEON → 64-bit Bitmask
+              </text>
+            </g>
+
+            <!-- Symmetric 90-degree bus down to 4 nodes centered at x = 86, 242, 398, 554 -->
+            <line x1="320" y1="240" x2="320" y2="260" stroke="#64748B" stroke-width="1.5" />
+            <line x1="86" y1="260" x2="554" y2="260" stroke="#64748B" stroke-width="1.5" />
+
+            <line x1="86" y1="260" x2="86" y2="278" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrow-muted)" />
+            <line x1="242" y1="260" x2="242" y2="278" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrow-muted)" />
+            <line x1="398" y1="260" x2="398" y2="278" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrow-muted)" />
+            <line x1="554" y1="260" x2="554" y2="278" stroke="#64748B" stroke-width="1.5" marker-end="url(#arrow-muted)" />
+
+            <!-- Bottom Leaf Target Nodes: 16px side margins + 16px gaps, uniform width=140 -->
+            <g>
+              <rect x="16" y="284" width="140" height="44" rx="8" fill="#1C212C" stroke="rgba(255,255,255,0.12)" />
+              <text x="86" y="303" text-anchor="middle" fill="#F1F5F9" font-family="Inter, sans-serif" font-size="11.5" font-weight="600">Columnar .crng</text>
+              <text x="86" y="317" text-anchor="middle" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="9.5">mmap + HW CRC32C</text>
+            </g>
+
+            <g>
+              <rect x="172" y="284" width="140" height="44" rx="8" fill="#1C212C" stroke="rgba(255,255,255,0.12)" />
+              <text x="242" y="303" text-anchor="middle" fill="#F1F5F9" font-family="Inter, sans-serif" font-size="11.5" font-weight="600">Arrow · HDF5</text>
+              <text x="242" y="317" text-anchor="middle" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="9.5">Zero-Copy C ABI</text>
+            </g>
+
+            <g>
+              <rect x="328" y="284" width="140" height="44" rx="8" fill="#1C212C" stroke="rgba(255,255,255,0.12)" />
+              <text x="398" y="303" text-anchor="middle" fill="#F1F5F9" font-family="Inter, sans-serif" font-size="11.5" font-weight="600">HDR Latency</text>
+              <text x="398" y="317" text-anchor="middle" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="9.5">Prometheus · OTLP</text>
+            </g>
+
+            <g>
+              <rect x="484" y="284" width="140" height="44" rx="8" fill="#1C212C" stroke="rgba(255,255,255,0.12)" />
+              <text x="554" y="303" text-anchor="middle" fill="#F1F5F9" font-family="Inter, sans-serif" font-size="11.5" font-weight="600">Dual-Write WAL</text>
+              <text x="554" y="317" text-anchor="middle" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="9.5">Merkle + Raft</text>
+            </g>
+          </svg>
+        </div>
+      </div>
     </div>
 
-    <!-- Clean visual pipeline diagram -->
-    <div class="mt-12 rounded-2xl border border-white/[0.08] bg-[#131316] p-6 sm:p-10">
-      <div class="grid grid-cols-1 items-center gap-4 lg:grid-cols-7 lg:gap-0">
-        <!-- Stage 1 -->
-        <div class="rounded-xl border border-white/[0.09] bg-[#202126] p-5">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[11px] font-medium text-[#6E7485]">STAGE 01</span>
-            <span class="h-2 w-2 rounded-full bg-[#3B82F6]/70"></span>
-          </div>
-          <div class="mt-2 text-base font-semibold text-[#F4F5F7]">Ingestion</div>
-          <div class="mt-1 font-mono text-xs text-[#60A5FA]">64 B EventFrame</div>
-          <p class="mt-3 text-xs leading-relaxed text-[#A1A6B3]">
-            Reserve-commit write · FPGA / Cryo / PCIe edge
-          </p>
-        </div>
-
-        <!-- Connector 1 -> 2 -->
-        <div class="flex items-center justify-center py-1 lg:px-2" aria-hidden="true">
-          <svg class="hidden h-6 w-full lg:block" viewBox="0 0 64 24" fill="none">
-            <line x1="2" y1="12" x2="54" y2="12" stroke="#3B82F6" stroke-opacity="0.45" stroke-width="1.5" stroke-dasharray="3 3" />
-            <path d="M51 7l6 5-6 5" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-          <svg class="h-6 w-6 lg:hidden" viewBox="0 0 24 24" fill="none">
-            <path d="M12 4v14m-4-4l4 4 4-4" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </div>
-
-        <!-- Stage 2 -->
-        <div class="rounded-xl border border-white/[0.09] bg-[#202126] p-5">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[11px] font-medium text-[#6E7485]">STAGE 02</span>
-            <span class="h-2 w-2 rounded-full bg-[#3B82F6]/80"></span>
-          </div>
-          <div class="mt-2 text-base font-semibold text-[#F4F5F7]">Lock-Free Ring</div>
-          <div class="mt-1 font-mono text-xs text-[#60A5FA]">acquire / release</div>
-          <p class="mt-3 text-xs leading-relaxed text-[#A1A6B3]">
-            Cached shadow indices · Zero-mutex SPSC / MPSC
-          </p>
-        </div>
-
-        <!-- Connector 2 -> 3 -->
-        <div class="flex items-center justify-center py-1 lg:px-2" aria-hidden="true">
-          <svg class="hidden h-6 w-full lg:block" viewBox="0 0 64 24" fill="none">
-            <line x1="2" y1="12" x2="54" y2="12" stroke="#3B82F6" stroke-opacity="0.65" stroke-width="1.5" stroke-dasharray="3 3" />
-            <path d="M51 7l6 5-6 5" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-          <svg class="h-6 w-6 lg:hidden" viewBox="0 0 24 24" fill="none">
-            <path d="M12 4v14m-4-4l4 4 4-4" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </div>
-
-        <!-- Stage 3 -->
-        <div class="rounded-xl border border-[#3B82F6]/35 bg-[#202126] p-5 shadow-[0_0_24px_rgba(59,130,246,0.08)]">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[11px] font-medium text-[#93C5FD]">STAGE 03</span>
-            <span class="h-2 w-2 rounded-full bg-[#3B82F6]"></span>
-          </div>
-          <div class="mt-2 text-base font-semibold text-[#F4F5F7]">SIMD Trigger</div>
-          <div class="mt-1 font-mono text-xs text-[#60A5FA]">SoA Bitmask Filter</div>
-          <p class="mt-3 text-xs leading-relaxed text-[#A1A6B3]">
-            Runtime ISA dispatch · Energy, timing &amp; pileup
-          </p>
-        </div>
-
-        <!-- Connector 3 -> 4 -->
-        <div class="flex items-center justify-center py-1 lg:px-2" aria-hidden="true">
-          <svg class="hidden h-6 w-full lg:block" viewBox="0 0 64 24" fill="none">
-            <line x1="2" y1="12" x2="54" y2="12" stroke="#3B82F6" stroke-opacity="0.85" stroke-width="1.5" stroke-dasharray="3 3" />
-            <path d="M51 7l6 5-6 5" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-          <svg class="h-6 w-6 lg:hidden" viewBox="0 0 24 24" fill="none">
-            <path d="M12 4v14m-4-4l4 4 4-4" stroke="#3B82F6" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </div>
-
-        <!-- Stage 4 -->
-        <div class="rounded-xl border border-white/[0.09] bg-[#202126] p-5">
-          <div class="flex items-center justify-between">
-            <span class="font-mono text-[11px] font-medium text-[#6E7485]">STAGE 04</span>
-            <span class="h-2 w-2 rounded-full bg-[#60A5FA]"></span>
-          </div>
-          <div class="mt-2 text-base font-semibold text-[#F4F5F7]">Columnar Sink</div>
-          <div class="mt-1 font-mono text-xs text-[#60A5FA]">.crng mmap Pages</div>
-          <p class="mt-3 text-xs leading-relaxed text-[#A1A6B3]">
-            57,408 B SoA pages · Stack LZ4 + HW CRC32C
-          </p>
-        </div>
-      </div>
-
-      <!-- Observability / Control sidecar ribbon -->
-      <div class="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-white/[0.07] pt-5 text-xs text-[#A1A6B3]">
-        <div class="flex items-center gap-2.5">
-          <span class="h-1.5 w-1.5 rounded-full bg-[#3B82F6]"></span>
-          <span>Side-channel lock-free HDR latency histogram (<code class="text-[#F4F5F7]">p50</code> / <code class="text-[#F4F5F7]">p99</code> / <code class="text-[#F4F5F7]">p99.9</code>) + reject-reason counters</span>
-        </div>
-        <span class="font-mono text-[#6E7485]">Dual-write WAL · Arrow C ABI · Raft quorum</span>
-      </div>
-    </div>
-
-    <!-- 4-column detailed breakdown -->
-    <div class="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+    <!-- Clean flat 4-column stage breakdown -->
+    <div class="mt-16 grid grid-cols-1 gap-8 border-t border-white/[0.08] pt-10 sm:grid-cols-2 lg:grid-cols-4">
       {stages.map((s) => (
-        <div class="rounded-2xl border border-white/[0.07] bg-[#202126]/45 p-6">
-          <div class="flex items-center justify-between font-mono text-xs">
-            <span class="text-[#6E7485]">{s.step}</span>
-            <span class="text-[#3B82F6]">{s.spec}</span>
-          </div>
-          <h3 class="mt-3 text-base font-semibold text-[#F4F5F7]">{s.title}</h3>
-          <p class="mt-2 text-sm leading-relaxed text-[#A1A6B3]">{s.body}</p>
+        <div>
+          <div class="font-mono text-xs font-medium text-[#38BDF8]">{s.step}</div>
+          <h3 class="mt-2.5 text-base font-semibold text-white">{s.title}</h3>
+          <p class="mt-2 text-sm leading-[1.65] text-[#A1A6B3]">{s.text}</p>
         </div>
       ))}
     </div>

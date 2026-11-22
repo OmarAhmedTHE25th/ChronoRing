@@ -10,60 +10,64 @@ const navLinks = [
 ];
 ---
 
-<header class="sticky top-0 z-50 border-b border-white/[0.06] bg-[#19191C]/80 backdrop-blur-xl">
-  <div class="mx-auto flex h-16 max-w-6xl items-center justify-between px-6 sm:px-8">
+<header class="sticky top-0 z-50 border-b border-white/[0.08] bg-[#050609]/85 backdrop-blur-xl">
+  <div class="mx-auto flex h-16 max-w-6xl items-center justify-between gap-6 px-6 sm:px-8">
+    <!-- Left: Brand mark + version badge -->
     <a
       href="#"
-      class="group flex items-center gap-3 text-sm font-semibold tracking-tight text-[#F4F5F7] transition-colors hover:text-white"
+      class="group inline-flex shrink-0 items-center gap-2.5 text-[#F4F5F7] transition-opacity duration-150 hover:opacity-90"
       aria-label="ChronoRing home"
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 32 32"
-        class="h-7 w-7 transition-transform duration-300 group-hover:rotate-45"
+        class="h-6 w-6 shrink-0 transition-transform duration-300 group-hover:rotate-45"
         fill="none"
         aria-hidden="true"
       >
         <circle cx="16" cy="16" r="11" stroke="#3B82F6" stroke-opacity="0.28" stroke-width="2.5" />
         <path d="M16 5A11 11 0 0 1 27 16" stroke="#3B82F6" stroke-width="2.75" stroke-linecap="round" />
-        <path d="M23.78 23.78A11 11 0 0 1 8.22 23.78" stroke="#60A5FA" stroke-width="2.75" stroke-linecap="round" />
-        <path d="M5 16A11 11 0 0 1 12 5.75" stroke="#93C5FD" stroke-width="2.75" stroke-linecap="round" />
+        <path d="M23.78 23.78A11 11 0 0 1 8.22 23.78" stroke="#14B8A6" stroke-width="2.75" stroke-linecap="round" />
+        <path d="M5 16A11 11 0 0 1 12 5.75" stroke="#60A5FA" stroke-width="2.75" stroke-linecap="round" />
         <circle cx="16" cy="16" r="2.75" fill="#F4F5F7" />
       </svg>
-      <span class="text-[15px] font-semibold tracking-[-0.02em]">ChronoRing</span>
-      <span class="hidden rounded-full border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 font-mono text-[11px] font-medium text-[#A1A6B3] sm:inline-block">
-        C++20
+      <span class="text-[16px] font-semibold tracking-[-0.02em] text-white">ChronoRing</span>
+      <span class="rounded-md border border-white/[0.1] bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] leading-none font-medium text-[#9CA3AF]">
+        v1.2.0
       </span>
     </a>
 
-    <nav class="hidden items-center gap-8 md:flex" aria-label="Primary navigation">
-      {navLinks.map((item) => (
-        <a
-          href={item.href}
-          class="text-sm font-medium text-[#A1A6B3] transition-colors duration-200 hover:text-[#F4F5F7]"
-        >
-          {item.label}
-        </a>
-      ))}
+    <!-- Center: Spaced semantic navigation list -->
+    <nav class="hidden md:block" aria-label="Primary navigation">
+      <ul class="m-0 flex list-none items-center gap-1 p-0 lg:gap-2">
+        {navLinks.map((item) => (
+          <li>
+            <a
+              href={item.href}
+              class="inline-flex items-center rounded-lg px-3.5 py-2 text-[14px] font-medium whitespace-nowrap text-[#B8BECB] transition-colors duration-150 hover:bg-white/[0.06] hover:text-white"
+            >
+              {item.label}
+            </a>
+          </li>
+        ))}
+      </ul>
     </nav>
 
-    <div class="flex items-center gap-3">
+    <!-- Right: CTA + mobile menu toggle -->
+    <div class="flex shrink-0 items-center gap-3">
       <a
         href={githubUrl}
         target="_blank"
         rel="noopener noreferrer"
-        class="inline-flex items-center gap-2 rounded-full border border-white/[0.12] bg-white/[0.04] px-4 py-1.5 text-sm font-medium text-[#F4F5F7] transition-all duration-200 hover:border-[#3B82F6]/50 hover:bg-[#3B82F6]/10"
+        class="hidden items-center justify-center rounded-full bg-[#3B82F6] px-5 py-2 text-[13px] font-semibold whitespace-nowrap text-white shadow-[0_0_20px_rgba(59,130,246,0.28)] transition-all duration-150 hover:bg-[#2563EB] hover:shadow-[0_0_24px_rgba(59,130,246,0.45)] sm:inline-flex"
       >
-        <svg viewBox="0 0 24 24" class="h-4 w-4 fill-current" aria-hidden="true">
-          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
-        </svg>
-        <span class="hidden sm:inline">GitHub</span>
+        View on GitHub
       </a>
 
       <button
         id="mobile-menu-btn"
         type="button"
-        class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-[#A1A6B3] transition-colors hover:text-white md:hidden"
+        class="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.04] text-[#C2C7D1] transition-colors duration-150 hover:bg-white/[0.08] hover:text-white md:hidden"
         aria-label="Toggle navigation menu"
         aria-expanded="false"
       >
@@ -77,19 +81,34 @@ const navLinks = [
     </div>
   </div>
 
+  <!-- Mobile drawer -->
   <div
     id="mobile-menu"
-    class="hidden border-t border-white/[0.06] bg-[#19191C] px-6 py-4 md:hidden"
+    class="hidden border-t border-white/[0.08] bg-[#0B0D12] px-6 py-4 md:hidden"
   >
-    <nav class="flex flex-col gap-3" aria-label="Mobile navigation">
-      {navLinks.map((item) => (
+    <nav aria-label="Mobile navigation">
+      <ul class="m-0 flex list-none flex-col gap-1 p-0">
+        {navLinks.map((item) => (
+          <li>
+            <a
+              href={item.href}
+              class="mobile-nav-link block rounded-lg px-3 py-2 text-sm font-medium text-[#B8BECB] transition-colors duration-150 hover:bg-white/[0.06] hover:text-white"
+            >
+              {item.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+      <div class="mt-3 border-t border-white/[0.08] pt-3">
         <a
-          href={item.href}
-          class="mobile-nav-link rounded-lg px-2 py-1.5 text-sm font-medium text-[#A1A6B3] transition-colors hover:bg-white/[0.04] hover:text-white"
+          href={githubUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex rounded-full bg-[#3B82F6] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#2563EB]"
         >
-          {item.label}
+          View on GitHub
         </a>
-      ))}
+      </div>
     </nav>
   </div>
 </header>

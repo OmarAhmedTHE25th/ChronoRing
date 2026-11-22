@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview"
+    "dev": "node -e \"require(require('path').join(require('path').dirname(process.env.npm_package_json),'scripts','astro-run.cjs'))\" dev",
+    "build": "node -e \"require(require('path').join(require('path').dirname(process.env.npm_package_json),'scripts','astro-run.cjs'))\" build",
+    "preview": "node -e \"require(require('path').join(require('path').dirname(process.env.npm_package_json),'scripts','astro-run.cjs'))\" preview"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.0.0",

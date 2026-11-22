@@ -1,111 +1,115 @@
 ---
 const formalUrl = "https://github.com/OmarAhmedTHE25th/ChronoRing/tree/main/formal";
 
-const highlights = [
+const proofItems = [
   {
-    tag: "Concurrency",
+    file: "formal/tla/SpscRing.tla",
+    property: "Wait-free cursor monotonicity & zero slot overwriting under TLC",
+  },
+  {
+    file: "formal/tla/MpscRing.tla",
+    property: "Vyukov per-slot sequence protocol linearizability & mutual exclusion",
+  },
+  {
+    file: "formal/lean/ChronoRingProofs.lean",
+    property: "Zero-sorry Lean 4 proofs of modular index disjointness & active ticket uniqueness",
+  },
+];
+
+const pillars = [
+  {
+    kicker: "Concurrency",
     title: "Lock-Free & Wait-Free Rings",
-    description:
-      "Power-of-two SPSC, Fan-Out, Vyukov MPSC, and MPMC ring buffers with 64-byte cache-line padding, producer-private shadow tail caching, zero-copy reserve/commit writes, and POSIX/Win32 shared-memory IPC.",
-    codeHint: "SpscRingBuffer · MpscRingBuffer · ShmRing",
-    featured: false,
+    text: "Power-of-two SPSC, Fan-Out broadcast, Vyukov MPSC, and lock-free MPMC rings padded to 64-byte cache boundaries with zero-copy reserve/commit writes and cross-process SHM.",
+    symbols: "SpscRingBuffer · MpscRingBuffer · ShmRing",
   },
   {
-    tag: "Vectorization",
+    kicker: "Vectorization",
     title: "SIMD Trigger Kernels",
-    description:
-      "Runtime CPU dispatch across AVX-512, AVX2, SSE4.2, ARM NEON, SVE2, RVV, and WASM-SIMD128 — plus a DSL-compiled trigger engine generating branchless 64-event bitmasks in registers.",
-    codeHint: "evaluate_columnar_page · compile_trigger_dsl",
-    featured: false,
+    text: "Runtime ISA dispatch across AVX-512, AVX2, SSE4.2, NEON, SVE2, RVV, and WASM-SIMD128 — plus a DSL bytecode and native JIT compiler emitting packed 64-bit event masks.",
+    symbols: "evaluate_columnar_page · compile_trigger_dsl",
   },
   {
-    tag: "Persistence",
-    title: "Zero-Copy Columnar Storage",
-    description:
-      "Events stream into fixed 57,408-byte memory-mapped Structure-of-Arrays pages with column projection masks, zero-allocation stack LZ4 compression, hardware CRC32C, and group-commit WAL.",
-    codeHint: "ColumnarSink · ColumnarReader · DurableColumnarStore",
-    featured: false,
+    kicker: "Storage",
+    title: "Zero-Copy Columnar Persistence",
+    text: "Fixed 57,408-byte Structure-of-Arrays memory-mapped pages with projection masks, 16 KiB stack-only LZ4 block compression, group-commit WAL, and SHA-256 PageMerkleTree.",
+    symbols: "ColumnarSink · ColumnarReader · DurableColumnarStore",
   },
   {
-    tag: "Formal Methods",
-    title: "TLA+ & Lean 4 Verification",
-    description:
-      "Machine-checked Lean 4 proofs and TLC state-space models prove cursor monotonicity, slot mutual exclusion, modular disjointness, and linearizability across SPSC and MPSC ring protocols.",
-    codeHint: "SpscRing.tla · MpscRing.tla · ChronoRingProofs.lean",
-    featured: true,
-    link: formalUrl,
-  },
-  {
-    tag: "Ecosystem",
-    title: "Scientific Interoperability",
-    description:
-      "Zero-copy Apache Arrow C Data Interface export, HDF5/Parquet/CERN ROOT schemas, live Python tailers, and clean FFI bindings for Rust, Go, Julia, C#, Java, LabVIEW, MATLAB, and ISO C89.",
-    codeHint: "ChronoArrowArray · export_hdf5_root_schema_json",
-    featured: false,
+    kicker: "Interoperability",
+    title: "Arrow, HDF5, ROOT & FFI",
+    text: "Zero-copy Apache Arrow C Data Interface export, HDF5/Parquet/CERN ROOT schemas, incremental Python/Polars stream tailers, and bindings for Rust, Go, Julia, C#, Java, MATLAB, LabVIEW, and C89.",
+    symbols: "ChronoArrowArray · export_hdf5_root_schema_json",
   },
 ];
 ---
 
-<section id="design" class="border-b border-white/[0.06] bg-[#19191C] py-24 sm:py-32">
+<section id="design" class="border-t border-white/[0.06] bg-[#0E1117] py-24 sm:py-32">
   <div class="mx-auto max-w-6xl px-6 sm:px-8">
     <div class="max-w-2xl">
       <p class="font-mono text-xs font-medium tracking-[0.14em] text-[#3B82F6] uppercase">
         Design Highlights
       </p>
-      <h2 class="mt-4 text-3xl font-semibold tracking-[-0.03em] text-[#F4F5F7] sm:text-4xl">
-        Mechanical sympathy backed by formal proofs.
+      <h2 class="mt-3 text-3xl font-bold tracking-[-0.03em] text-white sm:text-[40px] sm:leading-[1.12]">
+        Systems precision backed by formal verification.
       </h2>
-      <p class="mt-4 text-base leading-relaxed text-[#A1A6B3]">
-        Every layer is designed around hardware cache boundaries, predictable memory layouts, and verifiable invariants.
-      </p>
     </div>
 
-    <div class="mt-14 grid grid-cols-1 gap-6 md:grid-cols-6">
-      {highlights.map((item, idx) => (
-        <article
-          class={`flex flex-col justify-between rounded-2xl border p-8 transition-all duration-200 ${
-            idx < 3 ? "md:col-span-2" : "md:col-span-3"
-          } ${
-            item.featured
-              ? "border-[#3B82F6]/35 bg-[#1D222D]/70 hover:border-[#3B82F6]/60"
-              : "border-white/[0.08] bg-[#202126]/65 hover:border-white/[0.16] hover:bg-[#202126]"
-          }`}
-        >
-          <div>
-            <div class="flex items-center justify-between">
-              <span
-                class={`inline-flex items-center gap-2 font-mono text-xs font-medium ${
-                  item.featured ? "text-[#60A5FA]" : "text-[#3B82F6]"
-                }`}
-              >
-                {item.featured && (
-                  <span class="h-1.5 w-1.5 rounded-full bg-[#3B82F6]"></span>
-                )}
-                {item.tag}
-              </span>
-              {item.link && (
-                <a
-                  href={item.link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="font-mono text-xs text-[#93C5FD] transition-colors hover:text-white"
-                >
-                  formal/ &rarr;
-                </a>
-              )}
-            </div>
+    <!-- Spotlight banner for Formal Verification (TLA+ & Lean 4) -->
+    <div class="mt-12 overflow-hidden rounded-2xl border border-[#3B82F6]/30 bg-gradient-to-br from-[#0F172A] via-[#0D1322] to-[#0B1720] p-8 shadow-xl">
+      <div class="grid grid-cols-1 items-center gap-10 lg:grid-cols-12">
+        <div class="lg:col-span-6">
+          <div class="inline-flex items-center rounded-full border border-[#14B8A6]/35 bg-[#14B8A6]/10 px-3 py-1 font-mono text-[11px] font-medium text-[#5EEAD4]">
+            TLA+ &amp; Lean 4 Formal Methods
+          </div>
+          <h3 class="mt-4 text-2xl font-bold tracking-[-0.02em] text-white sm:text-3xl">
+            Proven lock-free safety, not just stress-tested.
+          </h3>
+          <p class="mt-3 text-sm leading-[1.65] text-[#A1A6B3] sm:text-base">
+            Core acquire/release ring protocols are checked exhaustively under TLC and verified in Lean 4 without <code class="text-[#E2E8F0]">sorry</code> placeholders.
+          </p>
+          <div class="mt-6">
+            <a
+              href={formalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center gap-2 text-sm font-semibold text-[#60A5FA] transition-colors duration-150 hover:text-white"
+            >
+              <span>Inspect proofs in formal/</span>
+              <svg viewBox="0 0 20 20" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10m-4-4l4 4-4 4" />
+              </svg>
+            </a>
+          </div>
+        </div>
 
-            <h3 class="mt-4 text-xl font-semibold tracking-[-0.02em] text-[#F4F5F7]">
+        <div class="divide-y divide-white/[0.08] rounded-xl border border-white/[0.08] bg-[#070A11]/85 px-6 py-2 lg:col-span-6">
+          {proofItems.map((p) => (
+            <div class="py-4">
+              <div class="font-mono text-xs font-medium text-[#38BDF8]">{p.file}</div>
+              <p class="mt-1.5 text-sm leading-[1.55] text-[#CBD5E1]">{p.property}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <!-- Clean 2x2 hairline-ruled architectural pillar grid -->
+    <div class="mt-14 grid grid-cols-1 gap-x-12 gap-y-12 md:grid-cols-2">
+      {pillars.map((item) => (
+        <article class="flex flex-col justify-between border-t border-white/[0.1] pt-7">
+          <div>
+            <div class="font-mono text-xs font-medium tracking-wider text-[#14B8A6] uppercase">
+              {item.kicker}
+            </div>
+            <h3 class="mt-2.5 text-xl font-semibold tracking-[-0.02em] text-white">
               {item.title}
             </h3>
-            <p class="mt-3 text-sm leading-relaxed text-[#A1A6B3]">
-              {item.description}
+            <p class="mt-3 text-sm leading-[1.65] text-[#A1A6B3]">
+              {item.text}
             </p>
           </div>
-
-          <div class="mt-7 border-t border-white/[0.07] pt-4 font-mono text-xs text-[#6E7485]">
-            {item.codeHint}
-          </div>
+          <div class="mt-5 font-mono text-xs text-[#8B93A4]">{item.symbols}</div>
         </article>
       ))}
     </div>
