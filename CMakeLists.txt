@@ -54,10 +54,14 @@ set(CHRONORING_CORE_SOURCES
     src/rdma_cxl_ring.cpp
     src/columnar_sink.cpp
     src/crypto_integrity.cpp
-    src/erasure_coding.cpp
+    src/deterministic_replay.cpp
     src/durable_store.cpp
+    src/erasure_coding.cpp
+    src/event_crypto.cpp
     src/tiered_storage.cpp
     src/observability.cpp
+    src/raft_cluster.cpp
+    src/scientific_interop.cpp
     src/control_plane.cpp
     src/c_api.cpp
 )
@@ -160,6 +164,7 @@ if(CHRONORING_BUILD_TESTS)
         test_durable_storage
         test_observability
         test_c_api
+        test_extreme_features
     )
 
     foreach(test_name IN LISTS CHRONORING_TESTS)
