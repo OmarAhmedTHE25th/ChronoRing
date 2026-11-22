@@ -60,6 +60,7 @@ public:
     [[nodiscard]] std::size_t write_batch(std::span<const EventFrame> frames) noexcept {
         return write_batch(frames.data(), frames.size());
     }
+    [[nodiscard]] bool write_soa_page(const ColumnarPage& page) noexcept;
 
     [[nodiscard]] bool is_open() const noexcept { return pages_ != nullptr; }
     [[nodiscard]] std::size_t pages_written() const noexcept { return committed_pages_; }

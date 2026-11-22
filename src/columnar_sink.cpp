@@ -675,6 +675,32 @@ std::size_t ColumnarSink::write_batch(const EventFrame* frames,
     return written;
 }
 
+bool ColumnarSink::write_soa_page(const ColumnarPage& page) noexcept {
+    if (pages_ == nullptr || !staging_page_) {
+        last_status_ = RingStatus::IoError;
+        return false;
+    }
+    const std::size_t n = std::min<std::size_t>(page.header.event_count, kColumnarPageEvents);
+    if (n == 0) {
+        return true;
+    }
+    if (active_page_count_ > 0 && !commit_active_page()) {
+        return false;
+    }
+    *staging_page_ = page;
+    active_page_count_ = n;
+    total_events_ += n;
+    active_first_seq_ = page.sequence_id[0];
+    active_last_seq_ = page.sequence_id[n - 1];
+    active_min_ts_ = page.timestamp_ns[0];
+    active_max_ts_ = page.timestamp_ns[0];
+    for (std::size_t i = 1; i < n; ++i) {
+        active_min_ts_ = std::min(active_min_ts_, page.timestamp_ns[i]);
+        active_max_ts_ = std::max(active_max_ts_, page.timestamp_ns[i]);
+    }
+    return commit_active_page();
+}
+
 bool ColumnarSink::flush() noexcept {
     if (pages_ == nullptr) {
         return false;
