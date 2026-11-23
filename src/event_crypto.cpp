@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cmath>
 #include <cstring>
+#include <limits>
+#include <random>
 
 namespace chronoring {
 
@@ -315,20 +316,59 @@ bool chacha20_poly1305_decrypt(const CryptoKey256& key,
 }
 
 // ============================================================================
-// DetectorKeyVault & Encrypted Triggering
+// DetectorKeyVault, Stateful Nonce Encryption & HMAC Flag Trapdoors
 // ============================================================================
 
+namespace {
+
+[[nodiscard]] CryptoKey256 derive_subkey(const CryptoKey256& root_key,
+                                         std::uint32_t detector_id,
+                                         const char* purpose,
+                                         std::size_t purpose_len) noexcept {
+    static constexpr std::uint8_t kSalt[] = "chronoring/detector-subkey/v2";
+    std::array<std::uint8_t, 64> info{};
+    const std::size_t clamped_len = std::min(purpose_len, info.size() - 4U);
+    std::memcpy(info.data(), purpose, clamped_len);
+    store_le32(info.data() + clamped_len, detector_id);
+    return hkdf_sha256(
+        std::span<const std::uint8_t>(kSalt, sizeof(kSalt) - 1),
+        root_key,
+        std::span<const std::uint8_t>(info.data(), clamped_len + 4U));
+}
+
+void build_event_aad(std::uint32_t detector_id,
+                     std::uint64_t sequence_id,
+                     const Sha256Digest& flag_trapdoor,
+                     std::array<std::uint8_t, 44>& out_aad) noexcept {
+    store_le32(out_aad.data(), detector_id);
+    store_le64(out_aad.data() + 4, sequence_id);
+    std::memcpy(out_aad.data() + 12, flag_trapdoor.data(), flag_trapdoor.size());
+}
+
+} // namespace
+
+DetectorKeyVault::~DetectorKeyVault() noexcept {
+    for (auto& [id, key] : keys_) {
+        (void)id;
+        secure_zero(key.data(), key.size());
+    }
+}
+
 void DetectorKeyVault::set_detector_key(std::uint32_t detector_id,
-                                        const CryptoKey256& key) {
-    keys_[detector_id] = key;
+                                        const CryptoKey256& root_key) {
+    keys_[detector_id] = root_key;
 }
 
 void DetectorKeyVault::derive_detector_key(const CryptoKey256& master_key,
                                            std::uint32_t detector_id) {
-    std::array<std::uint8_t, 36> buf{};
-    std::memcpy(buf.data(), master_key.data(), master_key.size());
-    store_le32(buf.data() + 32, detector_id);
-    keys_[detector_id] = sha256(buf.data(), buf.size());
+    static constexpr std::uint8_t kSalt[] = "chronoring/detector-root/v2";
+    std::array<std::uint8_t, 13> info{
+        'd', 'e', 't', 'e', 'c', 't', 'o', 'r', ':', 0, 0, 0, 0};
+    store_le32(info.data() + 9, detector_id);
+    keys_[detector_id] = hkdf_sha256(
+        std::span<const std::uint8_t>(kSalt, sizeof(kSalt) - 1),
+        master_key,
+        info);
 }
 
 Expected<CryptoKey256, RingStatus> DetectorKeyVault::get_key(
@@ -340,128 +380,156 @@ Expected<CryptoKey256, RingStatus> DetectorKeyVault::get_key(
     return it->second;
 }
 
-std::uint64_t ope_encode_f32(float value, const CryptoKey256& key) noexcept {
-    if (value == 0.0f) {
-        value = 0.0f;
+Expected<CryptoKey256, RingStatus> DetectorKeyVault::get_aead_key(
+    std::uint32_t detector_id) const noexcept {
+    const auto root = get_key(detector_id);
+    if (!root.has_value()) {
+        return unexpected(root.error());
     }
-    std::uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const std::uint32_t ordered =
-        ((bits & 0x80000000u) != 0u) ? ~bits : (bits ^ 0x80000000u);
+    static constexpr char kPurpose[] = "aead:";
+    return derive_subkey(*root, detector_id, kPurpose, sizeof(kPurpose) - 1);
+}
 
-    const std::uint64_t scale =
-        static_cast<std::uint64_t>((load_le32(key.data()) & 0x7FFFFFFEu) + 2u);
-    const std::uint64_t bias = static_cast<std::uint64_t>(load_le32(key.data() + 4));
-    return static_cast<std::uint64_t>(ordered) * scale + bias;
+Expected<CryptoKey256, RingStatus> DetectorKeyVault::get_trapdoor_key(
+    std::uint32_t detector_id) const noexcept {
+    const auto root = get_key(detector_id);
+    if (!root.has_value()) {
+        return unexpected(root.error());
+    }
+    static constexpr char kPurpose[] = "flag-trapdoor:";
+    return derive_subkey(*root, detector_id, kPurpose, sizeof(kPurpose) - 1);
 }
 
 Sha256Digest compute_flag_trapdoor(std::uint32_t quality_flags,
-                                   const CryptoKey256& key) noexcept {
-    std::array<std::uint8_t, 36> buf{};
-    std::memcpy(buf.data(), key.data(), key.size());
-    store_le32(buf.data() + 32, quality_flags & kSearchableFlagMask);
-    return sha256(buf.data(), buf.size());
+                                   const CryptoKey256& trapdoor_key) noexcept {
+    static constexpr std::uint8_t kDomain[] = "chronoring/flag-trapdoor/v2:";
+    std::array<std::uint8_t, sizeof(kDomain) - 1 + 4> msg{};
+    std::memcpy(msg.data(), kDomain, sizeof(kDomain) - 1);
+    store_le32(msg.data() + (sizeof(kDomain) - 1), quality_flags & kSearchableFlagMask);
+    return hmac_sha256(trapdoor_key, msg);
 }
 
-Expected<EncryptedEventFrame, RingStatus> encrypt_event_frame(
-    const EventFrame& frame,
-    const DetectorKeyVault& vault) noexcept {
-    const auto key_res = vault.get_key(frame.detector_id);
-    if (!key_res.has_value()) {
-        return unexpected(key_res.error());
+std::uint32_t DetectorEncryptor::generate_random_session_id() noexcept {
+    try {
+        std::random_device rd;
+        const std::uint32_t a = static_cast<std::uint32_t>(rd());
+        const std::uint32_t b = static_cast<std::uint32_t>(rd());
+        return a ^ std::rotl(b, 16);
+    } catch (...) {
+        return 0x5A3C96A5U;
     }
-    const CryptoKey256& key = *key_res;
+}
+
+DetectorEncryptor::DetectorEncryptor(const DetectorKeyVault& vault,
+                                     std::uint32_t session_id) noexcept
+    : vault_(&vault), session_id_(session_id), counter_(0) {}
+
+Expected<EncryptedEventFrame, RingStatus> DetectorEncryptor::encrypt(
+    const EventFrame& frame) noexcept {
+    if (vault_ == nullptr) {
+        return unexpected(RingStatus::InvalidArgument);
+    }
+    const auto aead_key_res = vault_->get_aead_key(frame.detector_id);
+    if (!aead_key_res.has_value()) {
+        return unexpected(aead_key_res.error());
+    }
+    const auto trapdoor_key_res = vault_->get_trapdoor_key(frame.detector_id);
+    if (!trapdoor_key_res.has_value()) {
+        return unexpected(trapdoor_key_res.error());
+    }
+
+    // Atomically allocate a strictly monotonic 64-bit nonce counter and fail closed
+    // before wrap-around so a nonce can never be reused under this session_id_.
+    std::uint64_t ctr = counter_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (ctr == std::numeric_limits<std::uint64_t>::max()) {
+            return unexpected(RingStatus::Full);
+        }
+        if (counter_.compare_exchange_weak(
+                ctr, ctr + 1U, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+
+    CryptoKey256 aead_key = *aead_key_res;
+    CryptoKey256 trapdoor_key = *trapdoor_key_res;
 
     EncryptedEventFrame enc{};
     enc.detector_id = frame.detector_id;
     enc.sequence_id = frame.sequence_id;
-    store_le32(enc.nonce.data(), frame.detector_id);
-    store_le64(enc.nonce.data() + 4, frame.sequence_id);
+    store_le32(enc.nonce.data(), session_id_);
+    store_le64(enc.nonce.data() + 4, ctr);
+    enc.flag_trapdoor = compute_flag_trapdoor(frame.quality_flags, trapdoor_key);
 
-    std::array<std::uint8_t, 12> aad{};
-    store_le32(aad.data(), frame.detector_id);
-    store_le64(aad.data() + 4, frame.sequence_id);
+    // Bind detector_id, sequence_id, AND flag_trapdoor into AEAD AAD so trapdoors
+    // cannot be swapped or forged across encrypted frames.
+    std::array<std::uint8_t, 44> aad{};
+    build_event_aad(enc.detector_id, enc.sequence_id, enc.flag_trapdoor, aad);
 
     const auto* plain = reinterpret_cast<const std::uint8_t*>(&frame);
     chacha20_poly1305_encrypt(
-        key,
+        aead_key,
         enc.nonce,
         aad,
         std::span<const std::uint8_t>(plain, sizeof(EventFrame)),
         enc.ciphertext.data(),
         enc.tag);
 
-    enc.ope_energy_token = ope_encode_f32(frame.energy_mev, key);
-    enc.ope_abs_timing_token = ope_encode_f32(std::fabs(frame.timing_ps), key);
-    enc.ope_pileup_token = ope_encode_f32(frame.pileup_score, key);
-    enc.flag_trapdoor = compute_flag_trapdoor(frame.quality_flags, key);
+    secure_zero(aead_key.data(), aead_key.size());
+    secure_zero(trapdoor_key.data(), trapdoor_key.size());
     return enc;
 }
 
 Expected<EventFrame, RingStatus> decrypt_event_frame(
     const EncryptedEventFrame& enc,
     const DetectorKeyVault& vault) noexcept {
-    const auto key_res = vault.get_key(enc.detector_id);
-    if (!key_res.has_value()) {
-        return unexpected(key_res.error());
+    const auto aead_key_res = vault.get_aead_key(enc.detector_id);
+    if (!aead_key_res.has_value()) {
+        return unexpected(aead_key_res.error());
     }
-    std::array<std::uint8_t, 12> aad{};
-    store_le32(aad.data(), enc.detector_id);
-    store_le64(aad.data() + 4, enc.sequence_id);
+    CryptoKey256 aead_key = *aead_key_res;
+
+    std::array<std::uint8_t, 44> aad{};
+    build_event_aad(enc.detector_id, enc.sequence_id, enc.flag_trapdoor, aad);
 
     EventFrame out{};
-    if (!chacha20_poly1305_decrypt(
-            *key_res,
-            enc.nonce,
-            aad,
-            enc.ciphertext,
-            enc.tag,
-            reinterpret_cast<std::uint8_t*>(&out))) {
+    const bool ok = chacha20_poly1305_decrypt(
+        aead_key,
+        enc.nonce,
+        aad,
+        enc.ciphertext,
+        enc.tag,
+        reinterpret_cast<std::uint8_t*>(&out));
+    secure_zero(aead_key.data(), aead_key.size());
+    if (!ok) {
         return unexpected(RingStatus::CorruptedPage);
     }
     return out;
 }
 
-Expected<EncryptedTriggerTrapdoor, RingStatus> make_encrypted_trigger_trapdoor(
+Expected<EncryptedFlagTrapdoor, RingStatus> make_encrypted_flag_trapdoor(
     std::uint32_t detector_id,
-    const TriggerConfig& cfg,
     const DetectorKeyVault& vault,
     std::uint32_t expected_healthy_flags) noexcept {
-    const auto key_res = vault.get_key(detector_id);
-    if (!key_res.has_value()) {
-        return unexpected(key_res.error());
+    const auto trapdoor_key_res = vault.get_trapdoor_key(detector_id);
+    if (!trapdoor_key_res.has_value()) {
+        return unexpected(trapdoor_key_res.error());
     }
-    const CryptoKey256& key = *key_res;
+    CryptoKey256 trapdoor_key = *trapdoor_key_res;
 
-    EncryptedTriggerTrapdoor td{};
+    EncryptedFlagTrapdoor td{};
     td.detector_id = detector_id;
-    td.check_flags = true;
-    td.min_energy_tok = ope_encode_f32(cfg.min_energy_mev, key);
-    td.max_energy_tok = ope_encode_f32(cfg.max_energy_mev, key);
-    td.max_abs_timing_tok = ope_encode_f32(cfg.max_abs_timing_ps, key);
-    td.max_pileup_tok = ope_encode_f32(cfg.max_pileup_score, key);
-    td.required_flag_trapdoor = compute_flag_trapdoor(expected_healthy_flags, key);
+    td.required_flag_trapdoor = compute_flag_trapdoor(expected_healthy_flags, trapdoor_key);
+    secure_zero(trapdoor_key.data(), trapdoor_key.size());
     return td;
 }
 
-bool evaluate_encrypted_trigger(const EncryptedEventFrame& enc,
-                                const EncryptedTriggerTrapdoor& trapdoor) noexcept {
+bool evaluate_encrypted_flag_trapdoor(const EncryptedEventFrame& enc,
+                                      const EncryptedFlagTrapdoor& trapdoor) noexcept {
     if (enc.detector_id != trapdoor.detector_id) {
         return false;
     }
-    if (enc.ope_energy_token < trapdoor.min_energy_tok ||
-        enc.ope_energy_token > trapdoor.max_energy_tok) {
-        return false;
-    }
-    if (enc.ope_abs_timing_token > trapdoor.max_abs_timing_tok ||
-        enc.ope_pileup_token > trapdoor.max_pileup_tok) {
-        return false;
-    }
-    if (trapdoor.check_flags &&
-        !constant_time_equal(enc.flag_trapdoor, trapdoor.required_flag_trapdoor)) {
-        return false;
-    }
-    return true;
+    return constant_time_equal(enc.flag_trapdoor, trapdoor.required_flag_trapdoor);
 }
 
 } // namespace chronoring

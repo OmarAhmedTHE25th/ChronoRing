@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -163,10 +164,38 @@ TEST(MpscRingTest, SingleThreadedWrapAroundStatusAndSpanPop) {
     }
 }
 
+namespace {
+
+std::size_t mpsc_stress_scale() noexcept {
+#if defined(_MSC_VER)
+    char* raw = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&raw, &len, "CHRONORING_STRESS_SCALE") == 0 && raw != nullptr) {
+        const long parsed = std::strtol(raw, nullptr, 10);
+        std::free(raw);
+        if (parsed >= 1 && parsed <= 100) {
+            return static_cast<std::size_t>(parsed);
+        }
+    }
+    return 1;
+#else
+    if (const char* raw = std::getenv("CHRONORING_STRESS_SCALE"); raw != nullptr) {
+        const long parsed = std::strtol(raw, nullptr, 10);
+        if (parsed >= 1 && parsed <= 100) {
+            return static_cast<std::size_t>(parsed);
+        }
+    }
+    return 1;
+#endif
+}
+
+} // namespace
+
 TEST(MpscRingTest, MultiProducerContentionAndLinearization) {
+    const std::size_t scale = mpsc_stress_scale();
     constexpr std::size_t kProducers = 4;
-    constexpr std::size_t kPerProducer = 25'000;
-    constexpr std::size_t kTotal = kProducers * kPerProducer;
+    const std::size_t kPerProducer = 75'000U * scale;
+    const std::size_t kTotal = kProducers * kPerProducer;
 
     auto ring = std::make_unique<MpscRingBuffer<EventFrame, 1024>>();
     std::atomic<bool> start_flag{false};
@@ -256,6 +285,64 @@ TEST(MpscRingTest, BlockingPushPopWaitAndTimeout) {
     producer.join();
     consumer.join();
     EXPECT_TRUE(ring.empty());
+}
+
+TEST(MpscRingTest, MultiProducerBlockingWaitStress) {
+    const std::size_t scale = mpsc_stress_scale();
+    constexpr std::size_t kProducers = 4;
+    const std::size_t kPerProducer = 5'000U * scale;
+    const std::size_t kTotal = kProducers * kPerProducer;
+
+    // Tiny capacity forces frequent full/empty futex wait/notify transitions across all producers.
+    auto ring = std::make_unique<MpscRingBuffer<EventFrame, 8>>();
+
+    std::vector<std::thread> producers;
+    producers.reserve(kProducers);
+    for (std::size_t p = 0; p < kProducers; ++p) {
+        producers.emplace_back([&, p]() {
+            for (std::size_t i = 0; i < kPerProducer; ++i) {
+                EventFrame ev{};
+                ev.detector_id = static_cast<std::uint32_t>(p);
+                ev.sequence_id = i;
+                ev.timestamp_ns = (static_cast<std::uint64_t>(p) << 32) | i;
+                EXPECT_TRUE(ring->push_wait(ev));
+            }
+        });
+    }
+
+    std::vector<std::size_t> next_expected(kProducers, 0);
+    std::size_t popped = 0;
+    std::thread consumer([&]() {
+        EventFrame ev{};
+        while (popped < kTotal) {
+            ASSERT_TRUE(ring->pop_wait(ev));
+            ASSERT_LT(ev.detector_id, kProducers);
+            EXPECT_EQ(ev.sequence_id, next_expected[ev.detector_id]);
+            EXPECT_EQ(ev.timestamp_ns,
+                      (static_cast<std::uint64_t>(ev.detector_id) << 32) | ev.sequence_id);
+            ++next_expected[ev.detector_id];
+            ++popped;
+        }
+    });
+
+    for (auto& t : producers) {
+        t.join();
+    }
+    consumer.join();
+
+    EXPECT_EQ(popped, kTotal);
+    for (std::size_t p = 0; p < kProducers; ++p) {
+        EXPECT_EQ(next_expected[p], kPerProducer);
+    }
+    EXPECT_TRUE(ring->empty());
+}
+
+TEST(MpscRingTest, MemoryFootprintMatchesDocumentedLayout) {
+    // Each EventFrame slot pairs a cache-line-aligned sequence atomic with a 64B EventFrame
+    // (128 B/slot -> 131,072 B slot array for 1024 frames, 2x SpscRingBuffer's 65,536 B).
+    static_assert(sizeof(EventFrame) == 64);
+    EXPECT_GE(sizeof(MpscRingBuffer<EventFrame, 1024>), 131'072U);
+    EXPECT_LE(sizeof(MpscRingBuffer<EventFrame, 1024>), 132'096U);
 }
 
 TEST(LatencyHistogramTest, ConcurrentRecordingAndQuantiles) {

@@ -6,9 +6,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 namespace chronoring::test {
@@ -36,7 +38,77 @@ EventFrame make_test_ev(std::uint64_t seq,
 
 } // namespace
 
-TEST(ExtremeFeaturesTest, ChaCha20Poly1305AndEncryptedTriggering) {
+TEST(ExtremeFeaturesTest, ChaCha20Poly1305Rfc8439KnownAnswerTest) {
+    // RFC 8439 Section 2.8.2 AEAD_CHACHA20_POLY1305 test vector.
+    const CryptoKey256 key{
+        0x80U, 0x81U, 0x82U, 0x83U, 0x84U, 0x85U, 0x86U, 0x87U,
+        0x88U, 0x89U, 0x8AU, 0x8BU, 0x8CU, 0x8DU, 0x8EU, 0x8FU,
+        0x90U, 0x91U, 0x92U, 0x93U, 0x94U, 0x95U, 0x96U, 0x97U,
+        0x98U, 0x99U, 0x9AU, 0x9BU, 0x9CU, 0x9DU, 0x9EU, 0x9FU,
+    };
+    const Nonce96 nonce{
+        0x07U, 0x00U, 0x00U, 0x00U, 0x40U, 0x41U,
+        0x42U, 0x43U, 0x44U, 0x45U, 0x46U, 0x47U,
+    };
+    const std::array<std::uint8_t, 12> aad{
+        0x50U, 0x51U, 0x52U, 0x53U, 0xC0U, 0xC1U,
+        0xC2U, 0xC3U, 0xC4U, 0xC5U, 0xC6U, 0xC7U,
+    };
+    const std::string plaintext =
+        "Ladies and Gentlemen of the class of '99: If I could offer you only one "
+        "tip for the future, sunscreen would be it.";
+    ASSERT_EQ(plaintext.size(), 114U);
+
+    const std::array<std::uint8_t, 114> expected_ct{
+        0xD3U, 0x1AU, 0x8DU, 0x34U, 0x64U, 0x8EU, 0x60U, 0xDBU,
+        0x7BU, 0x86U, 0xAFU, 0xBCU, 0x53U, 0xEFU, 0x7EU, 0xC2U,
+        0xA4U, 0xADU, 0xEDU, 0x51U, 0x29U, 0x6EU, 0x08U, 0xFEU,
+        0xA9U, 0xE2U, 0xB5U, 0xA7U, 0x36U, 0xEEU, 0x62U, 0xD6U,
+        0x3DU, 0xBEU, 0xA4U, 0x5EU, 0x8CU, 0xA9U, 0x67U, 0x12U,
+        0x82U, 0xFAU, 0xFBU, 0x69U, 0xDAU, 0x92U, 0x72U, 0x8BU,
+        0x1AU, 0x71U, 0xDEU, 0x0AU, 0x9EU, 0x06U, 0x0BU, 0x29U,
+        0x05U, 0xD6U, 0xA5U, 0xB6U, 0x7EU, 0xCDU, 0x3BU, 0x36U,
+        0x92U, 0xDDU, 0xBDU, 0x7FU, 0x2DU, 0x77U, 0x8BU, 0x8CU,
+        0x98U, 0x03U, 0xAEU, 0xE3U, 0x28U, 0x09U, 0x1BU, 0x58U,
+        0xFAU, 0xB3U, 0x24U, 0xE4U, 0xFAU, 0xD6U, 0x75U, 0x94U,
+        0x55U, 0x85U, 0x80U, 0x8BU, 0x48U, 0x31U, 0xD7U, 0xBCU,
+        0x3FU, 0xF4U, 0xDEU, 0xF0U, 0x8EU, 0x4BU, 0x7AU, 0x9DU,
+        0xE5U, 0x76U, 0xD2U, 0x65U, 0x86U, 0xCEU, 0xC6U, 0x4BU,
+        0x61U, 0x16U,
+    };
+    const AuthTag128 expected_tag{
+        0x1AU, 0xE1U, 0x0BU, 0x59U, 0x4FU, 0x09U, 0xE2U, 0x6AU,
+        0x7EU, 0x90U, 0x2EU, 0xCBU, 0xD0U, 0x60U, 0x06U, 0x91U,
+    };
+
+    std::array<std::uint8_t, 114> ct{};
+    AuthTag128 tag{};
+    chacha20_poly1305_encrypt(
+        key,
+        nonce,
+        aad,
+        std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(plaintext.data()), plaintext.size()),
+        ct.data(),
+        tag);
+    EXPECT_EQ(ct, expected_ct);
+    EXPECT_EQ(tag, expected_tag);
+
+    std::array<std::uint8_t, 114> pt_out{};
+    EXPECT_TRUE(chacha20_poly1305_decrypt(key, nonce, aad, ct, tag, pt_out.data()));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(pt_out.data()), pt_out.size()), plaintext);
+
+    // Flipping a bit in AAD, ciphertext, or tag must fail authentication.
+    auto bad_aad = aad;
+    bad_aad[0] ^= 0x01U;
+    EXPECT_FALSE(chacha20_poly1305_decrypt(key, nonce, bad_aad, ct, tag, pt_out.data()));
+
+    auto bad_tag = tag;
+    bad_tag[15] ^= 0x80U;
+    EXPECT_FALSE(chacha20_poly1305_decrypt(key, nonce, aad, ct, bad_tag, pt_out.data()));
+}
+
+TEST(ExtremeFeaturesTest, ChaCha20Poly1305SubkeySeparationNoncesAndTrapdoors) {
     DetectorKeyVault vault;
     CryptoKey256 master{};
     for (std::size_t i = 0; i < master.size(); ++i) {
@@ -45,38 +117,41 @@ TEST(ExtremeFeaturesTest, ChaCha20Poly1305AndEncryptedTriggering) {
     vault.derive_detector_key(master, 0);
     vault.derive_detector_key(master, 1);
 
-    const CryptoKey256 k0 = *vault.get_key(0);
-    const CryptoKey256 k1 = *vault.get_key(1);
-    EXPECT_NE(k0, k1);
+    const CryptoKey256 root0 = *vault.get_key(0);
+    const CryptoKey256 root1 = *vault.get_key(1);
+    const CryptoKey256 aead0 = *vault.get_aead_key(0);
+    const CryptoKey256 trap0 = *vault.get_trapdoor_key(0);
+    EXPECT_NE(root0, root1);
+    EXPECT_NE(aead0, root0);
+    EXPECT_NE(trap0, root0);
+    EXPECT_NE(aead0, trap0);
 
-    // Order-preserving float encoding monotonicity
-    EXPECT_LT(ope_encode_f32(-50.0f, k0), ope_encode_f32(-0.5f, k0));
-    EXPECT_LT(ope_encode_f32(-0.5f, k0), ope_encode_f32(0.0f, k0));
-    EXPECT_LT(ope_encode_f32(0.0f, k0), ope_encode_f32(12.5f, k0));
-    EXPECT_LT(ope_encode_f32(12.5f, k0), ope_encode_f32(12.501f, k0));
-
-    TriggerConfig cfg{};
-    cfg.min_energy_mev = 10.0f;
-    cfg.max_energy_mev = 500.0f;
-    cfg.max_abs_timing_ps = 120.0f;
-    cfg.max_pileup_score = 0.4f;
-    cfg.required_flags = kFlagValid | kFlagCalibrated;
-    cfg.forbidden_flags = kFlagSaturated | kFlagVeto;
-
-    const auto trapdoor = make_encrypted_trigger_trapdoor(0, cfg, vault);
+    const auto trapdoor = make_encrypted_flag_trapdoor(0, vault);
     ASSERT_TRUE(trapdoor.has_value());
 
+    DetectorEncryptor encryptor(vault, 0x11223344U);
+
+    // Encrypting the EXACT SAME (detector_id, sequence_id) frame twice MUST yield
+    // distinct nonces and distinct ciphertexts (stateful counter prevents nonce reuse).
+    const EventFrame dup_ev =
+        make_test_ev(42, 0, 50.0f, -30.0f, 0.1f, kFlagValid | kFlagCalibrated);
+    const auto enc_dup1 = encryptor.encrypt(dup_ev);
+    const auto enc_dup2 = encryptor.encrypt(dup_ev);
+    ASSERT_TRUE(enc_dup1.has_value());
+    ASSERT_TRUE(enc_dup2.has_value());
+    EXPECT_NE(enc_dup1->nonce, enc_dup2->nonce);
+    EXPECT_NE(enc_dup1->ciphertext, enc_dup2->ciphertext);
+    EXPECT_TRUE(decrypt_event_frame(*enc_dup1, vault).has_value());
+    EXPECT_TRUE(decrypt_event_frame(*enc_dup2, vault).has_value());
+
     const std::vector<EventFrame> events = {
-        make_test_ev(1, 0, 50.0f, -30.0f, 0.1f, kFlagValid | kFlagCalibrated), // pass
-        make_test_ev(2, 0, 5.0f, 10.0f, 0.1f, kFlagValid | kFlagCalibrated),   // low E
-        make_test_ev(3, 0, 80.0f, 200.0f, 0.1f, kFlagValid | kFlagCalibrated), // timing
-        make_test_ev(4, 0, 80.0f, 20.0f, 0.8f, kFlagValid | kFlagCalibrated),  // pileup
-        make_test_ev(5, 0, 80.0f, 20.0f, 0.1f, kFlagValid | kFlagVeto),       // vetoed
-        make_test_ev(6, 1, 80.0f, 20.0f, 0.1f, kFlagValid | kFlagCalibrated)  // wrong detector key
+        make_test_ev(1, 0, 50.0f, -30.0f, 0.1f, kFlagValid | kFlagCalibrated), // healthy det 0
+        make_test_ev(2, 0, 80.0f, 20.0f, 0.1f, kFlagValid | kFlagVeto),        // vetoed det 0
+        make_test_ev(3, 1, 80.0f, 20.0f, 0.1f, kFlagValid | kFlagCalibrated),  // healthy det 1
     };
 
     for (std::size_t i = 0; i < events.size(); ++i) {
-        const auto enc = encrypt_event_frame(events[i], vault);
+        const auto enc = encryptor.encrypt(events[i]);
         ASSERT_TRUE(enc.has_value());
 
         const auto dec = decrypt_event_frame(*enc, vault);
@@ -84,14 +159,18 @@ TEST(ExtremeFeaturesTest, ChaCha20Poly1305AndEncryptedTriggering) {
         EXPECT_EQ(dec->sequence_id, events[i].sequence_id);
         EXPECT_FLOAT_EQ(dec->energy_mev, events[i].energy_mev);
 
-        // Ciphertext 1-bit tamper must be rejected by AEAD Poly1305
+        // Ciphertext 1-bit tamper must be rejected by AEAD Poly1305.
         EncryptedEventFrame tampered = *enc;
         tampered.ciphertext[16] ^= 0x01U;
         EXPECT_FALSE(decrypt_event_frame(tampered, vault).has_value());
 
-        // Searchable encrypted trigger matches plaintext evaluation only for detector 0
-        const bool enc_hit = evaluate_encrypted_trigger(*enc, *trapdoor);
-        EXPECT_EQ(enc_hit, i == 0U);
+        // Flag trapdoor is authenticated in AAD; swapping/tampering it must fail decryption.
+        EncryptedEventFrame swapped_td = *enc;
+        swapped_td.flag_trapdoor[0] ^= 0x01U;
+        EXPECT_FALSE(decrypt_event_frame(swapped_td, vault).has_value());
+
+        // HMAC-SHA256 flag trapdoor matches healthy detector-0 events only.
+        EXPECT_EQ(evaluate_encrypted_flag_trapdoor(*enc, *trapdoor), i == 0U);
     }
 }
 

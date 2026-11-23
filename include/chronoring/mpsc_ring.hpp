@@ -29,12 +29,23 @@ namespace chronoring {
 //  - Producers claim a ticket via lock-free CAS on `enqueue_pos_` after
 //    constructing/staging the value into a local object, then perform a `noexcept`
 //    move-assignment into `slot.data` and publish via `slot.sequence.store(pos + 1,
-//    std::memory_order_release)`.
+//    std::memory_order_seq_cst)`.
+//  - Blocking wakeups (`push_wait` / `pop_wait`) synchronize via `memory_order_seq_cst`
+//    operations on `slot.sequence` and `waiters_{empty,full}_` rather than standalone
+//    `std::atomic_thread_fence`, so ThreadSanitizer models the wakeup handoff natively.
 //  - Note on bounded Vyukov MPSC progress: because slots are published in sequence
 //    order, a producer thread preempted or stalled mid-write between claiming a
 //    ticket and publishing `slot.sequence` temporarily blocks consumer progress on
 //    that specific slot until it resumes. Strict wait-free progress holds on SPSC
 //    channels (`SpscRingBuffer` and `SpscFanOut`).
+//
+// Memory footprint tradeoff:
+//  - Each `Slot` pairs an `std::atomic<std::size_t> sequence` with `T data` inside an
+//    `alignas(kCacheLineSize)` struct. For 64-byte cache-aligned payloads such as
+//    `EventFrame`, the sequence word occupies its own 64-byte cache line ahead of
+//    `data` (128 B/slot -> 131,072 B for 1,024 slots, i.e., 2x the 65,536 B slot
+//    storage of `SpscRingBuffer<EventFrame, 1024>`). This trades 2x memory footprint
+//    for per-slot false-sharing isolation between adjacent producers and consumer.
 template <typename T, std::size_t Capacity>
     requires (Capacity >= 2 && (Capacity & (Capacity - 1)) == 0) &&
              std::default_initializable<T> &&
@@ -88,16 +99,15 @@ public:
         std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
         for (;;) {
             Slot& slot = slots_[pos & kMask];
-            const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
+            const std::size_t seq = slot.sequence.load(std::memory_order_seq_cst);
             const std::ptrdiff_t diff =
                 static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos);
             if (diff == 0) {
                 if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
                     slot.data = std::move(item);
-                    slot.sequence.store(pos + 1, std::memory_order_release);
-                    std::atomic_thread_fence(std::memory_order_seq_cst);
-                    if (waiters_empty_.load(std::memory_order_relaxed) != 0) {
-                        not_empty_epoch_.fetch_add(1, std::memory_order_release);
+                    slot.sequence.store(pos + 1, std::memory_order_seq_cst);
+                    if (waiters_empty_.load(std::memory_order_seq_cst) != 0) {
+                        not_empty_epoch_.fetch_add(1, std::memory_order_seq_cst);
                         not_empty_epoch_.notify_one();
                     }
                     return true;
@@ -123,14 +133,14 @@ public:
     [[nodiscard]] bool try_pop(T& out) noexcept(kSlotResetNothrow) {
         const std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
         Slot& slot = slots_[pos & kMask];
-        const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
+        const std::size_t seq = slot.sequence.load(std::memory_order_seq_cst);
         const std::ptrdiff_t diff =
             static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
         if (diff < 0) {
             return false;
         }
         pop_slot_strong(slot.data, out);
-        slot.sequence.store(pos + Capacity, std::memory_order_release);
+        slot.sequence.store(pos + Capacity, std::memory_order_seq_cst);
         commit_pop_pos(pos + 1);
         return true;
     }
@@ -145,14 +155,14 @@ public:
         auto pop_loop = [&]() {
             while (popped < max_count) {
                 Slot& slot = slots_[pos & kMask];
-                const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
+                const std::size_t seq = slot.sequence.load(std::memory_order_seq_cst);
                 const std::ptrdiff_t diff =
                     static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
                 if (diff < 0) {
                     break;
                 }
                 pop_slot_strong(slot.data, out[popped]);
-                slot.sequence.store(pos + Capacity, std::memory_order_release);
+                slot.sequence.store(pos + Capacity, std::memory_order_seq_cst);
                 ++pos;
                 ++popped;
             }
@@ -209,7 +219,7 @@ public:
             }
             if (infinite) {
                 const std::uint32_t epoch =
-                    not_full_epoch_.load(std::memory_order_acquire);
+                    not_full_epoch_.load(std::memory_order_seq_cst);
                 waiters_full_.fetch_add(1, std::memory_order_seq_cst);
                 if (try_push(std::move(staged))) {
                     waiters_full_.fetch_sub(1, std::memory_order_relaxed);
@@ -257,7 +267,7 @@ public:
             }
             if (infinite) {
                 const std::uint32_t epoch =
-                    not_empty_epoch_.load(std::memory_order_acquire);
+                    not_empty_epoch_.load(std::memory_order_seq_cst);
                 waiters_empty_.fetch_add(1, std::memory_order_seq_cst);
                 if (try_pop(out)) {
                     waiters_empty_.fetch_sub(1, std::memory_order_relaxed);
@@ -309,10 +319,9 @@ private:
     }
 
     void commit_pop_pos(std::size_t new_pos) noexcept {
-        dequeue_pos_.store(new_pos, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (waiters_full_.load(std::memory_order_relaxed) != 0) {
-            not_full_epoch_.fetch_add(1, std::memory_order_release);
+        dequeue_pos_.store(new_pos, std::memory_order_release);
+        if (waiters_full_.load(std::memory_order_seq_cst) != 0) {
+            not_full_epoch_.fetch_add(1, std::memory_order_seq_cst);
             not_full_epoch_.notify_all();
         }
     }

@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -306,10 +307,38 @@ TEST(SpscRingTest, FanOutBroadcastToMultipleConsumers) {
     }
 }
 
+namespace {
+
+std::size_t stress_scale() noexcept {
+#if defined(_MSC_VER)
+    char* raw = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&raw, &len, "CHRONORING_STRESS_SCALE") == 0 && raw != nullptr) {
+        const long parsed = std::strtol(raw, nullptr, 10);
+        std::free(raw);
+        if (parsed >= 1 && parsed <= 100) {
+            return static_cast<std::size_t>(parsed);
+        }
+    }
+    return 1;
+#else
+    if (const char* raw = std::getenv("CHRONORING_STRESS_SCALE"); raw != nullptr) {
+        const long parsed = std::strtol(raw, nullptr, 10);
+        if (parsed >= 1 && parsed <= 100) {
+            return static_cast<std::size_t>(parsed);
+        }
+    }
+    return 1;
+#endif
+}
+
+} // namespace
+
 TEST(SpscRingTest, MultiCapacityStressOrderingAndIntegrity) {
-    run_capacity_stress<8>(5'000);
-    run_capacity_stress<64>(20'000);
-    run_capacity_stress<1024>(100'000);
+    const std::size_t scale = stress_scale();
+    run_capacity_stress<8>(50'000U * scale);
+    run_capacity_stress<64>(150'000U * scale);
+    run_capacity_stress<1024>(500'000U * scale);
 }
 
 TEST(SpscRingTest, CApiSurfaceSmoke) {

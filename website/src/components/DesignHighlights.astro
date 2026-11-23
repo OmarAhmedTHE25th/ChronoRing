@@ -17,15 +17,15 @@ const languages = [
 
 const advancedCapabilities = [
   {
-    title: "PCIe / CXL.mem P2P DMA",
+    title: "Simulated Fabric & Offload Layers",
     description:
-      "Direct FPGA-to-ring peer-to-peer DMA transfers and zero-copy RDMA fabric transport across memory tiers.",
+      "Software simulation and abstraction layers for PCIe/CXL DMA rings, fabric endpoints, and hardware trigger offload with CPU SIMD fallback.",
     source: "pcie_cxl_ring.hpp",
   },
   {
-    title: "ChaCha20-Poly1305 OPE Triggers",
+    title: "ChaCha20-Poly1305 AEAD & HKDF",
     description:
-      "Per-detector AEAD event encryption with monotonic order-preserving ciphertexts and searchable flag trapdoors.",
+      "RFC 8439 per-detector event encryption with HKDF-SHA256 subkey separation, stateful nonce counters, and AAD-bound HMAC-SHA256 flag trapdoors.",
     source: "event_crypto.hpp",
   },
   {
@@ -39,15 +39,15 @@ const advancedCapabilities = [
 const proofItems = [
   {
     file: "formal/tla/SpscRing.tla",
-    property: "Wait-free cursor monotonicity & zero slot overwriting under TLC",
+    property: "Bounded (capacity 4) TLC model checking cursor monotonicity & zero slot overwriting",
   },
   {
     file: "formal/tla/MpscRing.tla",
-    property: "Vyukov per-slot sequence protocol linearizability & mutual exclusion",
+    property: "Bounded (capacity 4) TLC model checking Vyukov slot ownership & sequence safety",
   },
   {
     file: "formal/lean/ChronoRingProofs.lean",
-    property: "Zero-sorry Lean 4 proofs of modular index disjointness & active ticket uniqueness",
+    property: "5 zero-sorry Lean 4 arithmetic lemmas for modular index & active ticket disjointness",
   },
 ];
 
@@ -98,10 +98,10 @@ const pillars = [
             TLA+ &amp; Lean 4 Formal Methods
           </div>
           <h3 class="mt-4 text-2xl font-bold tracking-[-0.02em] text-white sm:text-3xl">
-            Proven lock-free safety, not just stress-tested.
+            Bounded ring models &amp; index-disjointness lemmas.
           </h3>
           <p class="mt-3 text-sm leading-[1.65] text-[#A1A6B3] sm:text-base">
-            Core acquire/release ring protocols are checked exhaustively under TLC and verified in Lean 4 without <code class="text-[#E2E8F0]">sorry</code> placeholders.
+            Small bounded TLA+ models (capacity 4) check slot ownership and FIFO invariants under TLC, paired with 5 zero-<code class="text-[#E2E8F0]">sorry</code> Lean 4 arithmetic lemmas (run locally; not executed in CI).
           </p>
           <div class="mt-6">
             <a

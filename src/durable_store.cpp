@@ -27,6 +27,18 @@ namespace chronoring {
 
 namespace {
 
+PqSeed256 derive_lsn_pq_seed(const PqSeed256& master_seed, std::uint64_t lsn) noexcept {
+    static constexpr std::uint8_t kSalt[] = "chronoring/wal/wots+/v2";
+    std::array<std::uint8_t, 12> info{'l', 's', 'n', ':', 0, 0, 0, 0, 0, 0, 0, 0};
+    for (std::size_t b = 0; b < 8; ++b) {
+        info[4 + b] = static_cast<std::uint8_t>((lsn >> (b * 8)) & 0xFFU);
+    }
+    return hkdf_sha256(
+        std::span<const std::uint8_t>(kSalt, sizeof(kSalt) - 1),
+        master_seed,
+        info);
+}
+
 struct WalRecordHeader {
     std::uint32_t magic{kWalMagic};
     std::uint16_t version{1u};
@@ -235,9 +247,13 @@ Expected<std::uint64_t, RingStatus> DurableColumnarStore::append_page(
     entry.record.page_digest = raw_digest;
     entry.record.merkle_root = root;
     if (config_.enable_pq_signatures) {
-        const PqKeyPair kp = pq_generate_keypair(config_.pq_seed ^ lsn);
+        PqKeyPair kp = pq_generate_keypair(derive_lsn_pq_seed(config_.pq_seed, lsn));
+        const auto sig = pq_sign(root, kp.priv);
+        if (!sig.has_value()) {
+            return unexpected(sig.error());
+        }
         entry.record.has_pq_signature = true;
-        entry.record.pq_sig = pq_sign(root, kp.priv);
+        entry.record.pq_sig = *sig;
     }
     entry.wal_flags = config_.enable_compression
                           ? static_cast<std::uint16_t>(kPageFlagLz4)
@@ -436,7 +452,8 @@ Expected<std::size_t, RingStatus> DurableColumnarStore::recover() {
         }
 
         if (hdr.has_pq_signature != 0u) {
-            const PqKeyPair kp = pq_generate_keypair(config_.pq_seed ^ hdr.lsn);
+            const PqKeyPair kp =
+                pq_generate_keypair(derive_lsn_pq_seed(config_.pq_seed, hdr.lsn));
             if (!pq_verify(hdr.merkle_root, sig, kp.pub)) {
                 break;
             }
@@ -541,7 +558,8 @@ bool DurableColumnarStore::verify_commit_pq_signature(
     if (!rec.has_pq_signature) {
         return false;
     }
-    const PqKeyPair kp = pq_generate_keypair(config_.pq_seed ^ rec.lsn);
+    const PqKeyPair kp =
+        pq_generate_keypair(derive_lsn_pq_seed(config_.pq_seed, rec.lsn));
     return pq_verify(rec.merkle_root, rec.pq_sig, kp.pub);
 }
 

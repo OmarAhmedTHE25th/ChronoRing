@@ -32,9 +32,15 @@ jobs:
             build_type: RelWithDebInfo
             cmake_flags: "-DCHRONORING_ENABLE_ASAN_UBSAN=ON -DCHRONORING_BUILD_BENCHMARKS=OFF"
             run_bench: false
-          - name: ThreadSanitizer (TSan)
+          - name: ThreadSanitizer (Clang TSan)
             cc: clang
             cxx: clang++
+            build_type: RelWithDebInfo
+            cmake_flags: "-DCHRONORING_ENABLE_TSAN=ON -DCHRONORING_BUILD_BENCHMARKS=OFF"
+            run_bench: false
+          - name: ThreadSanitizer (GCC TSan)
+            cc: gcc
+            cxx: g++
             build_type: RelWithDebInfo
             cmake_flags: "-DCHRONORING_ENABLE_TSAN=ON -DCHRONORING_BUILD_BENCHMARKS=OFF"
             run_bench: false
@@ -61,7 +67,12 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests (CTest)
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          if [[ "${{ matrix.cmake_flags }}" == *"CHRONORING_ENABLE_TSAN=ON"* ]]; then
+            setarch "$(uname -m)" -R ctest --test-dir build --output-on-failure
+          else
+            ctest --test-dir build --output-on-failure
+          fi
 
       - name: Run CLI demo, replay, Prometheus & JSON report
         if: matrix.build_type == 'Release'
@@ -72,6 +83,18 @@ jobs:
           ./build/chronoring --prometheus 20000 | grep -q chronoring_events_submitted_total
           ./build/chronoring --json-report build/report.json
           test -s build/report.json
+
+      - name: Run Python test suites
+        if: matrix.build_type == 'Release'
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: |
+          if [ -f build/libchronoring_core.so ]; then
+            PYTHONPATH=python CHRONORING_LIB=build/libchronoring_core.so python3 python/examples/quickstart.py
+          fi
+          python3 tests/test_observability_python.py
+          python3 tests/test_ddl_codegen.py
+          python3 tests/test_selfhost.py
 
       - name: Run Google Benchmark JSON export
         if: matrix.run_bench
@@ -108,9 +131,12 @@ jobs:
         run: cmake --build build --parallel
       - name: Run unit tests (CTest)
         run: ctest --test-dir build --output-on-failure
-      - name: Run Python bindings smoke check
+      - name: Run Python test suites
         run: |
           PYTHONPATH=python CHRONORING_LIB=build/libchronoring_core.so python3 python/examples/quickstart.py
+          python3 tests/test_observability_python.py
+          python3 tests/test_ddl_codegen.py
+          python3 tests/test_selfhost.py
 
   macos:
     name: macOS Clang Release

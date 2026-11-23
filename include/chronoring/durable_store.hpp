@@ -21,7 +21,14 @@ struct DurableStoreConfig {
     std::size_t group_commit_max_pages{4};
     bool enable_compression{false};
     bool enable_pq_signatures{false};
-    std::uint64_t pq_seed{0xC4090516ULL};
+    // 256-bit master seed for deriving per-LSN WOTS+ one-time keys via HKDF-SHA256.
+    // Production deployments MUST populate this from a CSPRNG.
+    PqSeed256 pq_seed{
+        0xC4U, 0x09U, 0x05U, 0x16U, 0xA1U, 0xB2U, 0xC3U, 0xD4U,
+        0xE5U, 0xF6U, 0x07U, 0x18U, 0x29U, 0x3AU, 0x4BU, 0x5CU,
+        0x6DU, 0x7EU, 0x8FU, 0x90U, 0x11U, 0x22U, 0x33U, 0x44U,
+        0x55U, 0x66U, 0x77U, 0x88U, 0x99U, 0xAAU, 0xBBU, 0xCCU,
+    };
 };
 
 struct CommitRecord {

@@ -145,17 +145,37 @@ struct Sha256Ctx {
     }
 };
 
-Sha256Digest wots_chain_step(const Sha256Digest& cur,
-                             std::size_t chain_idx,
-                             std::size_t start_step,
-                             std::size_t steps) noexcept {
+// RFC 8391-style WOTS+ chaining function with per-step public-seed keyed hash
+// and bitmask XOR:
+//   K  = SHA256(0x03 || pub_seed || uint16_be(chain_idx) || uint8(step))
+//   BM = SHA256(0x04 || pub_seed || uint16_be(chain_idx) || uint8(step))
+//   val' = SHA256(0x02 || K || (val XOR BM))
+Sha256Digest wots_plus_chain_step(const Sha256Digest& cur,
+                                  const PqSeed256& pub_seed,
+                                  std::size_t chain_idx,
+                                  std::size_t start_step,
+                                  std::size_t steps) noexcept {
     Sha256Digest val = cur;
     for (std::size_t s = 0; s < steps; ++s) {
-        std::array<std::uint8_t, 1 + 2 + 32> buf{};
+        const std::uint8_t step = static_cast<std::uint8_t>((start_step + s) & 0xFFU);
+
+        std::array<std::uint8_t, 1 + 32 + 2 + 1> adrs{};
+        adrs[0] = 0x03U;
+        std::memcpy(adrs.data() + 1, pub_seed.data(), pub_seed.size());
+        adrs[33] = static_cast<std::uint8_t>((chain_idx >> 8U) & 0xFFU);
+        adrs[34] = static_cast<std::uint8_t>(chain_idx & 0xFFU);
+        adrs[35] = step;
+        const Sha256Digest key = sha256(adrs.data(), adrs.size());
+
+        adrs[0] = 0x04U;
+        const Sha256Digest bitmask = sha256(adrs.data(), adrs.size());
+
+        std::array<std::uint8_t, 1 + 32 + 32> buf{};
         buf[0] = 0x02U;
-        buf[1] = static_cast<std::uint8_t>(chain_idx & 0xFFU);
-        buf[2] = static_cast<std::uint8_t>((start_step + s) & 0xFFU);
-        std::memcpy(buf.data() + 3, val.data(), val.size());
+        std::memcpy(buf.data() + 1, key.data(), key.size());
+        for (std::size_t b = 0; b < 32; ++b) {
+            buf[33 + b] = static_cast<std::uint8_t>(val[b] ^ bitmask[b]);
+        }
         val = sha256(buf.data(), buf.size());
     }
     return val;
@@ -183,6 +203,124 @@ Sha256Digest sha256(const void* data, std::size_t len) noexcept {
     Sha256Ctx ctx;
     ctx.update(data, len);
     return ctx.finish();
+}
+
+void secure_zero(void* data, std::size_t len) noexcept {
+    if (data == nullptr || len == 0) {
+        return;
+    }
+    volatile std::uint8_t* p = static_cast<volatile std::uint8_t*>(data);
+    for (std::size_t i = 0; i < len; ++i) {
+        p[i] = 0U;
+    }
+}
+
+Sha256Digest hmac_sha256(std::span<const std::uint8_t> key,
+                         std::span<const std::uint8_t> data) noexcept {
+    std::array<std::uint8_t, 64> key_block{};
+    if (key.size() > key_block.size()) {
+        const Sha256Digest hashed_key = sha256(key.data(), key.size());
+        std::memcpy(key_block.data(), hashed_key.data(), hashed_key.size());
+    } else if (!key.empty()) {
+        std::memcpy(key_block.data(), key.data(), key.size());
+    }
+
+    std::array<std::uint8_t, 64> ipad{};
+    std::array<std::uint8_t, 64> opad{};
+    for (std::size_t i = 0; i < 64; ++i) {
+        ipad[i] = static_cast<std::uint8_t>(key_block[i] ^ 0x36U);
+        opad[i] = static_cast<std::uint8_t>(key_block[i] ^ 0x5CU);
+    }
+
+    Sha256Ctx inner;
+    inner.update(ipad.data(), ipad.size());
+    if (!data.empty()) {
+        inner.update(data.data(), data.size());
+    }
+    const Sha256Digest inner_digest = inner.finish();
+
+    Sha256Ctx outer;
+    outer.update(opad.data(), opad.size());
+    outer.update(inner_digest.data(), inner_digest.size());
+    const Sha256Digest mac = outer.finish();
+
+    secure_zero(key_block.data(), key_block.size());
+    secure_zero(ipad.data(), ipad.size());
+    secure_zero(opad.data(), opad.size());
+    return mac;
+}
+
+Sha256Digest hkdf_sha256_extract(std::span<const std::uint8_t> salt,
+                                 std::span<const std::uint8_t> ikm) noexcept {
+    if (salt.empty()) {
+        static constexpr Sha256Digest kZeroSalt{};
+        return hmac_sha256(kZeroSalt, ikm);
+    }
+    return hmac_sha256(salt, ikm);
+}
+
+bool hkdf_sha256_expand(const Sha256Digest& prk,
+                        std::span<const std::uint8_t> info,
+                        std::span<std::uint8_t> okm) noexcept {
+    constexpr std::size_t kHashLen = 32;
+    if (okm.empty()) {
+        return true;
+    }
+    const std::size_t n = (okm.size() + kHashLen - 1U) / kHashLen;
+    if (n > 255U) {
+        return false;
+    }
+
+    Sha256Digest prev{};
+    std::size_t written = 0;
+
+    // RFC 5869 Section 2.3: T(i) = HMAC-Hash(PRK, T(i-1) || info || i)
+    // Build input using streaming HMAC (ipad/opad) to avoid heap allocation.
+    std::array<std::uint8_t, 64> ipad{};
+    std::array<std::uint8_t, 64> opad{};
+    for (std::size_t i = 0; i < 64; ++i) {
+        const std::uint8_t kb = (i < prk.size()) ? prk[i] : 0U;
+        ipad[i] = static_cast<std::uint8_t>(kb ^ 0x36U);
+        opad[i] = static_cast<std::uint8_t>(kb ^ 0x5CU);
+    }
+
+    for (std::size_t block = 1; block <= n; ++block) {
+        Sha256Ctx inner;
+        inner.update(ipad.data(), ipad.size());
+        if (block > 1) {
+            inner.update(prev.data(), prev.size());
+        }
+        if (!info.empty()) {
+            inner.update(info.data(), info.size());
+        }
+        const std::uint8_t counter = static_cast<std::uint8_t>(block);
+        inner.update(&counter, 1);
+        const Sha256Digest inner_digest = inner.finish();
+
+        Sha256Ctx outer;
+        outer.update(opad.data(), opad.size());
+        outer.update(inner_digest.data(), inner_digest.size());
+        prev = outer.finish();
+
+        const std::size_t to_copy = std::min(kHashLen, okm.size() - written);
+        std::memcpy(okm.data() + written, prev.data(), to_copy);
+        written += to_copy;
+    }
+
+    secure_zero(prev.data(), prev.size());
+    secure_zero(ipad.data(), ipad.size());
+    secure_zero(opad.data(), opad.size());
+    return true;
+}
+
+Sha256Digest hkdf_sha256(std::span<const std::uint8_t> salt,
+                         std::span<const std::uint8_t> ikm,
+                         std::span<const std::uint8_t> info) noexcept {
+    Sha256Digest prk = hkdf_sha256_extract(salt, ikm);
+    Sha256Digest out{};
+    (void)hkdf_sha256_expand(prk, info, out);
+    secure_zero(prk.data(), prk.size());
+    return out;
 }
 
 std::string digest_to_hex(const Sha256Digest& digest) {
@@ -308,34 +446,95 @@ bool PageMerkleTree::verify_proof(const Sha256Digest& leaf_hash,
 }
 
 // ============================================================================
-// Post-Quantum Winternitz OTS (w=16, SHA-256)
+// Post-Quantum Winternitz OTS+ (WOTS+, w=16, SHA-256, 256-bit seeds)
 // ============================================================================
 
-PqKeyPair pq_generate_keypair(std::uint64_t seed) noexcept {
-    PqKeyPair kp{};
-    std::array<std::uint8_t, 13> sk_seed{};
-    for (std::size_t b = 0; b < 8; ++b) {
-        sk_seed[b] = static_cast<std::uint8_t>((seed >> (b * 8)) & 0xFFU);
+PqPrivateKey::~PqPrivateKey() noexcept {
+    secure_zero(sk.data(), sizeof(sk));
+    secure_zero(pub_seed.data(), sizeof(pub_seed));
+    used = true;
+    initialized = false;
+}
+
+PqPrivateKey::PqPrivateKey(PqPrivateKey&& other) noexcept
+    : pub_seed(other.pub_seed),
+      sk(other.sk),
+      used(other.used),
+      initialized(other.initialized) {
+    secure_zero(other.sk.data(), sizeof(other.sk));
+    secure_zero(other.pub_seed.data(), sizeof(other.pub_seed));
+    other.used = true;
+    other.initialized = false;
+}
+
+PqPrivateKey& PqPrivateKey::operator=(PqPrivateKey&& other) noexcept {
+    if (this != &other) {
+        secure_zero(sk.data(), sizeof(sk));
+        pub_seed = other.pub_seed;
+        sk = other.sk;
+        used = other.used;
+        initialized = other.initialized;
+        secure_zero(other.sk.data(), sizeof(other.sk));
+        secure_zero(other.pub_seed.data(), sizeof(other.pub_seed));
+        other.used = true;
+        other.initialized = false;
     }
-    sk_seed[12] = 0xA5U;
+    return *this;
+}
+
+PqKeyPair pq_generate_keypair(const PqSeed256& secret_seed,
+                              const PqSeed256& pub_seed) noexcept {
+    PqKeyPair kp{};
+    kp.pub.pub_seed = pub_seed;
+    kp.priv.pub_seed = pub_seed;
+    kp.priv.used = false;
+    kp.priv.initialized = true;
+
+    Sha256Digest prk = hkdf_sha256_extract(pub_seed, secret_seed);
+    std::array<std::uint8_t, 20> info{
+        'c', 'h', 'r', 'o', 'n', 'o', 'r', 'i', 'n', 'g', '/',
+        'w', 'o', 't', 's', '+', '/', 's', 0,   0};
 
     for (std::size_t i = 0; i < kWotsChains; ++i) {
-        sk_seed[8] = static_cast<std::uint8_t>(i & 0xFFU);
-        sk_seed[9] = static_cast<std::uint8_t>((i >> 8U) & 0xFFU);
-        sk_seed[10] = 0;
-        sk_seed[11] = 0;
-        kp.priv.sk[i] = sha256(sk_seed.data(), sk_seed.size());
-        kp.pub.pk[i] = wots_chain_step(kp.priv.sk[i], i, 0, 15);
+        info[18] = static_cast<std::uint8_t>((i >> 8U) & 0xFFU);
+        info[19] = static_cast<std::uint8_t>(i & 0xFFU);
+        (void)hkdf_sha256_expand(prk, info, kp.priv.sk[i]);
+        kp.pub.pk[i] = wots_plus_chain_step(kp.priv.sk[i], pub_seed, i, 0, 15);
     }
+
+    secure_zero(prk.data(), prk.size());
     return kp;
 }
 
-PqSignature pq_sign(const Sha256Digest& msg, const PqPrivateKey& sk) noexcept {
+PqKeyPair pq_generate_keypair(const PqSeed256& seed_256) noexcept {
+    static constexpr std::uint8_t kSalt[] = "chronoring/wots+/keygen/v2";
+    static constexpr std::uint8_t kSkInfo[] = "secret-seed";
+    static constexpr std::uint8_t kPkInfo[] = "public-seed";
+    const std::span<const std::uint8_t> salt(kSalt, sizeof(kSalt) - 1);
+    PqSeed256 secret_seed = hkdf_sha256(
+        salt, seed_256, std::span<const std::uint8_t>(kSkInfo, sizeof(kSkInfo) - 1));
+    const PqSeed256 pub_seed = hkdf_sha256(
+        salt, seed_256, std::span<const std::uint8_t>(kPkInfo, sizeof(kPkInfo) - 1));
+    PqKeyPair kp = pq_generate_keypair(secret_seed, pub_seed);
+    secure_zero(secret_seed.data(), secret_seed.size());
+    return kp;
+}
+
+Expected<PqSignature, RingStatus> pq_sign(const Sha256Digest& msg,
+                                          PqPrivateKey& sk) noexcept {
+    if (!sk.initialized || sk.used) {
+        return unexpected(RingStatus::InvalidArgument);
+    }
+    sk.used = true;
+
     const auto digits = wots_base16_digits(msg);
     PqSignature sig{};
     for (std::size_t i = 0; i < kWotsChains; ++i) {
-        sig.sig[i] = wots_chain_step(sk.sk[i], i, 0, digits[i]);
+        sig.sig[i] = wots_plus_chain_step(sk.sk[i], sk.pub_seed, i, 0, digits[i]);
     }
+
+    // Wipe private chain values immediately after one-time use.
+    secure_zero(sk.sk.data(), sizeof(sk.sk));
     return sig;
 }
 
@@ -345,7 +544,8 @@ bool pq_verify(const Sha256Digest& msg,
     const auto digits = wots_base16_digits(msg);
     for (std::size_t i = 0; i < kWotsChains; ++i) {
         const std::size_t rem = 15U - digits[i];
-        const Sha256Digest derived_pk = wots_chain_step(sig.sig[i], i, digits[i], rem);
+        const Sha256Digest derived_pk =
+            wots_plus_chain_step(sig.sig[i], pk.pub_seed, i, digits[i], rem);
         if (!constant_time_equal(derived_pk, pk.pk[i])) {
             return false;
         }

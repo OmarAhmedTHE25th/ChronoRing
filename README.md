@@ -6,20 +6,26 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 
 ---
 
-## Key Results
+## Key Results (Isolated Microbenchmarks)
 
-| Metric | Value |
+| Microbenchmark (`bench_chronoring`) | Value |
 |--------|-------|
-| SPSC ring throughput | **198.15 M items/s** (5.05 ns/op) |
-| Cross-thread vs mutex queue | **~4.9× faster** |
+| SPSC ring throughput (single-thread) | **198.15 M items/s** (5.05 ns/op) |
+| Cross-thread SPSC vs mutex queue | **~4.9× faster** |
 | SIMD SoA trigger (AVX2) | **422.20 M events/s** (2.40× over scalar) |
 | Hardware CRC32C | **4.97 GiB/s** (22.1× over software) |
 
-Designed for high-rate detector telemetry: wait-free SPSC / fan-out rings, Vyukov-style MPSC queuing, SIMD trigger filtering, zero-copy columnar persistence, and formal safety proofs (TLA+ / Lean 4).
+> **Microbenchmark vs. end-to-end pipeline latency:** The `5.05 ns/op` figure measures isolated raw ring push/pop operations in `bench_chronoring`. End-to-end `TelemetryPipeline` runs (`./build/chronoring --demo`) include cross-thread batching, consumer scheduling/wakeups, SoA page staging, optional LZ4 compression, CRC32C checksumming, and disk/mmap I/O — typically exhibiting p50 event latencies in the hundreds of microseconds (e.g., ~840 µs on a typical laptop/WSL host).
+
+Designed for high-rate detector telemetry: wait-free SPSC / fan-out rings, bounded Vyukov-style MPSC queuing, SIMD trigger filtering, and zero-copy columnar persistence.
 
 ChronoRing targets the same constraints found in high-energy physics data acquisition: millions of events per second, strict latency bounds, zero-allocation hot paths, and the need for both high throughput and verifiable integrity. The design deliberately mirrors patterns used in modern DAQ and online systems (lock-free buffering, columnar layouts, SIMD filtering, memory-mapped persistence).
 
-**Formal Verification**: TLA+ specifications and Lean 4 proofs for the core ring-buffer safety properties (no data races, cursor monotonicity, and linearizability of the SPSC/MPSC protocols). Note that strict wait-free / lock-free progress holds on SPSC and `SpscFanOut` channels; `MpscRingBuffer` uses a bounded Vyukov per-slot CAS reservation protocol where a stalled producer mid-write can block consumer progress on that specific slot.
+**Formal Methods Scope**: `formal/` contains small bounded TLA+ models (capacity 4, ~350 states) checking safety invariants (slot ownership, cursor bounds, FIFO ordering) and 5 Lean 4 modular-arithmetic lemmas without `sorry`. They do **not** prove full linearizability or C++20 weak-memory-model correctness, and they do not run in CI. Note also that strict wait-free progress holds on SPSC and `SpscFanOut` channels; `MpscRingBuffer` uses a bounded Vyukov per-slot CAS reservation protocol where a producer stalled mid-write blocks consumer progress on that specific slot until it resumes.
+
+**Memory Cost Tradeoff (`MpscRingBuffer` vs. `SpscRingBuffer`)**: In `MpscRingBuffer`, each `alignas(64) Slot` pairs an `std::atomic<std::size_t> sequence` with `T data`. For 64-byte cache-aligned `EventFrame` payloads, the sequence word occupies its own 64-byte cache line ahead of `data` (`128 B/slot`, or **131,072 B** for 1,024 slots — **2×** the **65,536 B** slot storage of `SpscRingBuffer<EventFrame, 1024>`). This trades 2× memory for per-slot false-sharing isolation.
+
+**Simulated / Software-Abstraction Backends**: The core ring buffers, SIMD triggers, LZ4 codec, CRC32C, memory-mapped `.crng` sink/reader, WAL store, shared-memory IPC, and crypto primitives are real C++20 implementations. By contrast, `pcie_cxl_ring.hpp`, `rdma_cxl_ring.hpp`, `hw_offload.hpp` (CUDA/HIP/DPDK/io_uring/FPGA), and the S3/MinIO/Ceph tier in `tiered_storage.hpp` are **local software simulations / abstraction layers** (no live kernel VFIO, `libibverbs`/RDMA, CUDA, DPDK, `io_uring`, or HTTP S3 client code).
 
 ---
 
@@ -61,21 +67,21 @@ ChronoRing targets the same constraints found in high-energy physics data acquis
 | `include/chronoring/status.hpp` | `RingStatus`, `Expected<T, E>`, `version()`, and lock-free structured `LogCallback` hooks. |
 | `include/chronoring/event_frame.hpp` | 64-byte `EventFrame`, `ColumnarPageHeader`, `ColumnProjectionMask`, and 1024-event `ColumnarPage` (`57,408` bytes). |
 | `include/chronoring/spsc_ring.hpp` | Wait-free `SpscRingBuffer` (shadow caching, `std::span` batching, RAII `reserve_push`/`reserve_pop` & `try_reserve_push`/`try_peek`) + wait-free `SpscFanOut`. |
-| `include/chronoring/mpsc_ring.hpp` | Bounded Vyukov-style `MpscRingBuffer` (lock-free CAS slot reservation, exception-safe pre-CAS construction; a producer stalled mid-write can block that slot) with adaptive spin/yield/`std::atomic::wait`. |
+| `include/chronoring/mpsc_ring.hpp` | Bounded Vyukov-style `MpscRingBuffer` (lock-free CAS slot reservation, exception-safe pre-CAS construction, `seq_cst` wakeups; `128 B/slot` = 2× slot memory vs. `SpscRingBuffer` for 64 B `EventFrame`s). |
 | `include/chronoring/mpmc_ring.hpp` | Lock-free `MpmcRingBuffer` and arbitrary M:N `RingTopologyRouter` (`Broadcast`, `RoundRobin`, `PredicateFiltered`). |
 | `include/chronoring/shm_ring.hpp` | Cross-process shared-memory ring (`shm_open`/`mmap` on POSIX, `CreateFileMapping` on Win32) + `ShmScopeGuard`. |
-| `include/chronoring/pcie_cxl_ring.hpp` | Direct PCIe BAR / VFIO / CXL.mem DAX zero-CPU FPGA DMA ring (`PcieCxlRing`, `MockFpgaDmaProducer`). |
-| `include/chronoring/rdma_cxl_ring.hpp` | Unified zero-copy distributed `FabricRingEndpoint` across SHM, CXL.mem, and one-sided RDMA (RoCEv2 / InfiniBand). |
+| `include/chronoring/pcie_cxl_ring.hpp` | *Simulated* PCIe BAR / CXL.mem DMA ring abstraction (`PcieCxlRing`, `MockFpgaDmaProducer`; local memory simulation, no kernel VFIO/PCIe driver). |
+| `include/chronoring/rdma_cxl_ring.hpp` | *Simulated* distributed fabric transport (`FabricRingEndpoint`; local loopback/software simulation, no live `libibverbs`/RoCEv2/InfiniBand RDMA stack). |
 | `include/chronoring/quantum_detector.hpp` | Cryogenic & quantum sensor ingestion adapters (`SNSPD`, `TES`, `MKID`, `SQUID`, `IonTrapQubit`) and trigger presets. |
 | `include/chronoring/simd_trigger.hpp` | AVX-512, AVX2, SSE4.2, SVE2, NEON, RVV, WASM-SIMD128, and scalar kernels + diagnostics & JSON serialization. |
 | `include/chronoring/trigger_jit.hpp` | Custom trigger DSL compiler & 64-lane SIMD bytecode / native JIT evaluator (`compile_trigger_dsl`). |
-| `include/chronoring/hw_offload.hpp` | Hardware trigger offload router (`IoUring`, `Dpdk`, `CudaHipGpu`, `FpgaOpenCl`) with automatic CPU SIMD fallback. |
+| `include/chronoring/hw_offload.hpp` | *Simulated* hardware trigger offload router (`IoUring`, `Dpdk`, `CudaHipGpu`, `FpgaOpenCl`) dispatching to local simulation / CPU SIMD fallback (no live CUDA, DPDK, or `io_uring` driver code). |
 | `include/chronoring/soa_pipeline.hpp` | Pure-SoA dataflow hot path (`SoaDataflowPipeline`, `SoaBatchBuilder`, `compact_soa_page`) with zero AoS conversion. |
 | `include/chronoring/columnar_sink.hpp` | In-memory staged `ColumnarSink` (projection + optional LZ4 compression) & `ColumnarReader` (time/sequence seeking, CRC32C, offline replay). |
-| `include/chronoring/crypto_integrity.hpp` | FIPS 180-4 SHA-256, `PageMerkleTree` inclusion proofs, and quantum-resistant WOTS+ hash signatures. |
+| `include/chronoring/crypto_integrity.hpp` | FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, RFC 5869 HKDF-SHA256, `PageMerkleTree`, and 256-bit single-use RFC 8391-style WOTS+ signatures. |
 | `include/chronoring/erasure_coding.hpp` | Systematic GF(2^8) Cauchy Reed-Solomon encoder/reconstructor with per-shard CRC32C. |
 | `include/chronoring/durable_store.hpp` | ACID group-commit WAL (`DurableColumnarStore`), synchronous quorum replication, and time-travel PITR. |
-| `include/chronoring/tiered_storage.hpp` | Automatic NVMe → SSD → S3/MinIO/Ceph tiering (`TieredStorageManager`) & `GeoReplicatedBackup`. |
+| `include/chronoring/tiered_storage.hpp` | *Simulated* multi-tier NVMe → SSD → S3/MinIO/Ceph tiering (`TieredStorageManager`) & `GeoReplicatedBackup` (local filesystem / simulated object-store abstraction, no live S3 HTTP client). |
 | `include/chronoring/lz4_codec.hpp` | Zero-allocation LZ4-format block encoder/decoder using a fixed 16 KiB stack hash table. |
 | `include/chronoring/numa.hpp` | Portable CPU topology queries and core-pinning / NUMA policy helpers. |
 | `include/chronoring/latency_histogram.hpp` | Lock-free logarithmic HDR histogram (`< 0.8%` bucket width, `0 ns` to `> 270 s`). |
@@ -86,7 +92,7 @@ ChronoRing targets the same constraints found in high-energy physics data acquis
 | `python/chronoring/__init__.py` | Thin zero-dependency `ctypes` Python bindings built atop `libchronoring_core`. |
 | `python/chronoring/live_stream.py` | Incremental live `.crng` columnar stream tailer (`LiveCrngStream`) with PyArrow/Polars/Jupyter adapters. |
 | `python/chronoring/dashboard.py` | Zero-dependency HTTP web dashboard & control plane (`/api/metrics`, `/metrics`, `/api/otlp`, `POST /api/config`). |
-| `include/chronoring/event_crypto.hpp` | Per-detector ChaCha20-Poly1305 AEAD (`DetectorKeyVault`), monotonic OPE ciphertexts, and searchable flag trapdoors (`evaluate_encrypted_trigger`). |
+| `include/chronoring/event_crypto.hpp` | Per-detector RFC 8439 ChaCha20-Poly1305 AEAD (`DetectorKeyVault` with HKDF-SHA256 subkey separation, stateful counter-owning `DetectorEncryptor`, and AAD-bound HMAC-SHA256 flag trapdoors). |
 | `include/chronoring/deterministic_replay.hpp` | Bit-identical multi-file offline replay (`DeterministicReplayEngine`) with SHA-256 `PageMerkleTree` transcript digest. |
 | `include/chronoring/raft_cluster.hpp` | Embedded Raft consensus (`RaftRingCluster`) forming a single logical distributed ring with quorum replication & failover. |
 | `include/chronoring/scientific_interop.hpp` | Zero-copy Apache Arrow C Data Interface (`export_columnar_page_to_arrow`) and HDF5 / Parquet / CERN ROOT schema export. |
@@ -121,12 +127,18 @@ See [docs/DESIGN.md](docs/DESIGN.md) for detailed architecture notes.
 
 ## Measured Performance (`bench_chronoring`, GCC 13 `-O3`, 8-core x86_64)
 
-| Benchmark | Measured Throughput / Latency | Notes |
+These numbers are **isolated component microbenchmarks** from `bench_chronoring`:
+
+| Microbenchmark | Measured Throughput / Latency | Notes |
 |---|---|---|
-| `SpscRingBuffer` single-thread push/pop | **198.15 M items/s** (`5.05 ns/op`, `11.81 GiB/s`) | Shadow index caching |
+| `SpscRingBuffer` single-thread push/pop | **198.15 M items/s** (`5.05 ns/op`, `11.81 GiB/s`) | Raw ring op, shadow index caching |
 | `SpscRingBuffer` cross-thread vs `std::mutex` + `std::queue` | **14.87 M items/s** vs `6.39 M items/s` | **~4.9x faster** wall-clock (`0.74 ms` vs `3.66 ms`) |
 | SIMD SoA Trigger (`ColumnarPage`, AVX2 vs Scalar) | **422.20 M items/s** vs `175.65 M items/s` | **2.40x speedup**, bit-exact |
 | Hardware CRC32C (`_mm_crc32_u64`) vs Software Table | **4.97 GiB/s** vs `229.41 MiB/s` | **22.1x speedup** on 57.4 KB page |
+
+For end-to-end pipeline runs (`./build/chronoring --demo`), latency includes producer-to-consumer batching, thread scheduling/wakeups, SoA staging, compression, CRC32C, and disk/mmap I/O (typically hundreds of microseconds p50, e.g., ~840 µs on a laptop/WSL host), rather than the `5.05 ns` raw ring operation.
+
+For extended concurrency soak testing beyond the default CTest counts, set `CHRONORING_STRESS_SCALE` (e.g., `CHRONORING_STRESS_SCALE=10 ctest --test-dir build -R "spsc|mpsc" --output-on-failure`).
 
 ---
 
@@ -234,11 +246,11 @@ PYTHONPATH=python python3 -m chronoring.dashboard --host 127.0.0.1 --port 8080 -
 
 ---
 
-## Formal Verification
+## Formal Models & Arithmetic Lemmas
 
-Machine-checked proofs and state-space models live in `formal/`:
-- **TLA+ Specifications**: `formal/tla/SpscRing.tla` and `formal/tla/MpscRing.tla` verify shadow-cursor monotonicity, slot mutual exclusion, Vyukov sequence safety, and strict FIFO ordering under TLC.
-- **Lean 4 Proofs**: `formal/lean/ChronoRingProofs.lean` provides zero-`sorry` machine-checked proofs of modular ring disjointness and active ticket exclusivity (see [formal/README.md](formal/README.md)).
+Small formal models and arithmetic lemmas live in `formal/` (run locally; not executed in CI):
+- **TLA+ Models**: `formal/tla/SpscRing.tla` and `formal/tla/MpscRing.tla` run TLC at bounded capacity 4 (~350 states) checking shadow-cursor monotonicity, slot ownership, sequence safety, and FIFO ordering under sequential interleaving.
+- **Lean 4 Lemmas**: `formal/lean/ChronoRingProofs.lean` contains 5 zero-`sorry` modular-arithmetic lemmas for ring index disjointness and active ticket exclusivity (see [formal/README.md](formal/README.md)). These do not prove full linearizability or C++20 weak-memory-model reorderings.
 
 ---
 

@@ -12,6 +12,7 @@
 namespace chronoring {
 
 using Sha256Digest = std::array<std::uint8_t, 32>;
+using PqSeed256 = std::array<std::uint8_t, 32>;
 
 inline constexpr std::size_t kWotsChains = 67; // 64 message nibbles + 3 checksum nibbles
 
@@ -20,6 +21,26 @@ inline constexpr std::size_t kWotsChains = 67; // 64 message nibbles + 3 checksu
 [[nodiscard]] inline Sha256Digest sha256(std::span<const std::uint8_t> data) noexcept {
     return sha256(data.data(), data.size());
 }
+
+// RFC 2104 HMAC-SHA256.
+[[nodiscard]] Sha256Digest hmac_sha256(std::span<const std::uint8_t> key,
+                                       std::span<const std::uint8_t> data) noexcept;
+
+// RFC 5869 HKDF-SHA256 Extract & Expand.
+[[nodiscard]] Sha256Digest hkdf_sha256_extract(std::span<const std::uint8_t> salt,
+                                               std::span<const std::uint8_t> ikm) noexcept;
+
+[[nodiscard]] bool hkdf_sha256_expand(const Sha256Digest& prk,
+                                      std::span<const std::uint8_t> info,
+                                      std::span<std::uint8_t> okm) noexcept;
+
+// Convenience one-shot RFC 5869 HKDF-SHA256 deriving a 32-byte key.
+[[nodiscard]] Sha256Digest hkdf_sha256(std::span<const std::uint8_t> salt,
+                                       std::span<const std::uint8_t> ikm,
+                                       std::span<const std::uint8_t> info) noexcept;
+
+// Best-effort volatile memory wipe for secret key material.
+void secure_zero(void* data, std::size_t len) noexcept;
 
 [[nodiscard]] std::string digest_to_hex(const Sha256Digest& digest);
 
@@ -60,13 +81,33 @@ private:
     std::vector<Sha256Digest> leaves_{};
 };
 
-// Quantum-resistant Winternitz One-Time Signature (WOTS, w=16, SHA-256).
+// Quantum-resistant Winternitz One-Time Signature Plus (WOTS+, w=16, SHA-256,
+// RFC 8391-style per-step keyed bitmask XOR) with 256-bit secret & public seeds.
+//
+// SECURITY CONTRACT:
+//   WOTS+ is strictly a ONE-TIME signature scheme. Reusing a private key to sign
+//   two distinct messages enables forgery. `PqPrivateKey` is therefore move-only
+//   and `pq_sign` marks it consumed and wipes its secret chain values in place,
+//   rejecting any subsequent signing attempt with `RingStatus::InvalidArgument`.
 struct PqPublicKey {
+    PqSeed256 pub_seed{};
     std::array<Sha256Digest, kWotsChains> pk{};
 };
 
 struct PqPrivateKey {
+    PqSeed256 pub_seed{};
     std::array<Sha256Digest, kWotsChains> sk{};
+    bool used{false};
+    bool initialized{false};
+
+    PqPrivateKey() noexcept = default;
+    ~PqPrivateKey() noexcept;
+
+    PqPrivateKey(const PqPrivateKey&) = delete;
+    PqPrivateKey& operator=(const PqPrivateKey&) = delete;
+
+    PqPrivateKey(PqPrivateKey&& other) noexcept;
+    PqPrivateKey& operator=(PqPrivateKey&& other) noexcept;
 };
 
 struct PqKeyPair {
@@ -78,10 +119,18 @@ struct PqSignature {
     std::array<Sha256Digest, kWotsChains> sig{};
 };
 
-[[nodiscard]] PqKeyPair pq_generate_keypair(std::uint64_t seed) noexcept;
+// Generate a WOTS+ key pair from explicit 256-bit secret and public seeds.
+[[nodiscard]] PqKeyPair pq_generate_keypair(const PqSeed256& secret_seed,
+                                            const PqSeed256& pub_seed) noexcept;
 
-[[nodiscard]] PqSignature pq_sign(const Sha256Digest& msg,
-                                  const PqPrivateKey& sk) noexcept;
+// Generate a WOTS+ key pair from a single 256-bit seed by deriving domain-separated
+// secret and public seeds via HKDF-SHA256.
+[[nodiscard]] PqKeyPair pq_generate_keypair(const PqSeed256& seed_256) noexcept;
+
+// Sign `msg` with `sk`, consuming and wiping `sk` so it cannot be reused.
+// Returns `RingStatus::InvalidArgument` if `sk` is uninitialized or already used.
+[[nodiscard]] Expected<PqSignature, RingStatus> pq_sign(const Sha256Digest& msg,
+                                                        PqPrivateKey& sk) noexcept;
 
 [[nodiscard]] bool pq_verify(const Sha256Digest& msg,
                              const PqSignature& sig,

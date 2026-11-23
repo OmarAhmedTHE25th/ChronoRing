@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -43,10 +44,43 @@ std::filesystem::path temp_file_path(const char* name) {
 } // namespace
 
 TEST(ColumnarSinkTest, Crc32cStandardVectorAndHwSwEquivalence) {
+    // Standard ASCII check value ("123456789")
     constexpr char kVector[] = "123456789";
     EXPECT_EQ(crc32c_sw(kVector, 9), 0xE3069283u);
     EXPECT_EQ(crc32c_hw(kVector, 9), 0xE3069283u);
     EXPECT_EQ(crc32c(kVector, 9), 0xE3069283u);
+
+    // RFC 3720 Appendix B.4 iSCSI CRC32C Known-Answer Tests
+    std::array<std::uint8_t, 32> zeros{};
+    EXPECT_EQ(crc32c_sw(zeros.data(), zeros.size()), 0x8A9136AAu);
+    EXPECT_EQ(crc32c_hw(zeros.data(), zeros.size()), 0x8A9136AAu);
+
+    std::array<std::uint8_t, 32> ones{};
+    ones.fill(0xFFu);
+    EXPECT_EQ(crc32c_sw(ones.data(), ones.size()), 0x62A8AB43u);
+    EXPECT_EQ(crc32c_hw(ones.data(), ones.size()), 0x62A8AB43u);
+
+    std::array<std::uint8_t, 32> asc{};
+    std::array<std::uint8_t, 32> desc{};
+    for (std::size_t i = 0; i < 32; ++i) {
+        asc[i] = static_cast<std::uint8_t>(i);
+        desc[i] = static_cast<std::uint8_t>(31U - i);
+    }
+    EXPECT_EQ(crc32c_sw(asc.data(), asc.size()), 0x46DD794Eu);
+    EXPECT_EQ(crc32c_hw(asc.data(), asc.size()), 0x46DD794Eu);
+    EXPECT_EQ(crc32c_sw(desc.data(), desc.size()), 0x113FDB5Cu);
+    EXPECT_EQ(crc32c_hw(desc.data(), desc.size()), 0x113FDB5Cu);
+
+    const std::array<std::uint8_t, 48> iscsi_read_pdu{
+        0x01U, 0xC0U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x14U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x04U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x14U, 0x00U, 0x00U, 0x00U, 0x18U,
+        0x28U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x02U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+    };
+    EXPECT_EQ(crc32c_sw(iscsi_read_pdu.data(), iscsi_read_pdu.size()), 0xD9963A56u);
+    EXPECT_EQ(crc32c_hw(iscsi_read_pdu.data(), iscsi_read_pdu.size()), 0xD9963A56u);
 
     std::vector<std::uint8_t> buf(1033);
     for (std::size_t i = 0; i < buf.size(); ++i) {
