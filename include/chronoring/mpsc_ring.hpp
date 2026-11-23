@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -21,13 +22,30 @@
 
 namespace chronoring {
 
-// Lock-free bounded Multi-Producer Single-Consumer ring buffer (Vyukov per-slot sequence).
+// Bounded Multi-Producer Single-Consumer ring buffer using a Vyukov per-slot
+// sequence protocol with lock-free CAS slot reservation on `enqueue_pos_`.
+//
+// Progress & memory-ordering contract:
+//  - Producers claim a ticket via lock-free CAS on `enqueue_pos_` after
+//    constructing/staging the value into a local object, then perform a `noexcept`
+//    move-assignment into `slot.data` and publish via `slot.sequence.store(pos + 1,
+//    std::memory_order_release)`.
+//  - Note on bounded Vyukov MPSC progress: because slots are published in sequence
+//    order, a producer thread preempted or stalled mid-write between claiming a
+//    ticket and publishing `slot.sequence` temporarily blocks consumer progress on
+//    that specific slot until it resumes. Strict wait-free progress holds on SPSC
+//    channels (`SpscRingBuffer` and `SpscFanOut`).
 template <typename T, std::size_t Capacity>
+    requires (Capacity >= 2 && (Capacity & (Capacity - 1)) == 0) &&
+             std::default_initializable<T> &&
+             std::movable<T> &&
+             std::is_nothrow_destructible_v<T> &&
+             std::is_nothrow_move_assignable_v<T>
 class MpscRingBuffer {
     static_assert(Capacity >= 2 && (Capacity & (Capacity - 1)) == 0,
                   "MpscRingBuffer Capacity must be a power of 2 and >= 2");
-    static_assert(std::is_move_constructible_v<T> || std::is_copy_constructible_v<T>,
-                  "T must be copy or move constructible");
+    static_assert(std::is_nothrow_move_assignable_v<T> && std::is_nothrow_destructible_v<T>,
+                  "T must have noexcept move assignment and destructor");
 
 public:
     static constexpr std::size_t kCapacity = Capacity;
@@ -45,26 +63,26 @@ public:
     MpscRingBuffer& operator=(MpscRingBuffer&&) = delete;
 
     [[nodiscard]] RingStatus try_push_status(const T& item) noexcept(
-        std::is_nothrow_copy_assignable_v<T>) {
+        std::is_nothrow_copy_constructible_v<T>)
+        requires std::copy_constructible<T> {
         return try_push(item) ? RingStatus::Ok : RingStatus::Full;
     }
 
     [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+        std::is_trivially_destructible_v<T> || std::is_nothrow_default_constructible_v<T>) {
         return try_pop(out) ? RingStatus::Ok : RingStatus::Empty;
     }
 
-    [[nodiscard]] bool try_push(const T& item) noexcept(std::is_nothrow_copy_assignable_v<T>) {
-        return try_emplace(item);
+    [[nodiscard]] bool try_push(const T& item) noexcept(
+        std::is_nothrow_copy_constructible_v<T>)
+        requires std::copy_constructible<T> {
+        // Construct copy before claiming a slot so any copy exception leaves
+        // `enqueue_pos_` and `slot.sequence` intact.
+        T copy(item);
+        return try_push(std::move(copy));
     }
 
-    [[nodiscard]] bool try_push(T&& item) noexcept(std::is_nothrow_move_assignable_v<T>) {
-        return try_emplace(std::move(item));
-    }
-
-    template <typename... Args>
-    [[nodiscard]] bool try_emplace(Args&&... args) noexcept(
-        std::is_nothrow_constructible_v<T, Args&&...> && std::is_nothrow_move_assignable_v<T>) {
+    [[nodiscard]] bool try_push(T&& item) noexcept {
         std::size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
         for (;;) {
             Slot& slot = slots_[pos & kMask];
@@ -73,7 +91,7 @@ public:
                 static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos);
             if (diff == 0) {
                 if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    slot.data = T(std::forward<Args>(args)...);
+                    slot.data = std::move(item);
                     slot.sequence.store(pos + 1, std::memory_order_release);
                     std::atomic_thread_fence(std::memory_order_seq_cst);
                     if (waiters_empty_.load(std::memory_order_relaxed) != 0) {
@@ -90,7 +108,18 @@ public:
         }
     }
 
-    [[nodiscard]] bool try_pop(T& out) noexcept(std::is_nothrow_move_assignable_v<T>) {
+    template <typename... Args>
+        requires std::constructible_from<T, Args&&...>
+    [[nodiscard]] bool try_emplace(Args&&... args) noexcept(
+        std::is_nothrow_constructible_v<T, Args&&...>) {
+        // Construct `T` on the local stack before entering the CAS loop;
+        // move-assignment inside the claimed slot is constrained `noexcept`.
+        T value(std::forward<Args>(args)...);
+        return try_push(std::move(value));
+    }
+
+    [[nodiscard]] bool try_pop(T& out) noexcept(
+        std::is_trivially_destructible_v<T> || std::is_nothrow_default_constructible_v<T>) {
         const std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
         Slot& slot = slots_[pos & kMask];
         const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
@@ -155,8 +184,11 @@ public:
     // Blocking push with adaptive spin -> yield -> futex (std::atomic::wait) backoff.
     [[nodiscard]] bool push_wait(
         const T& item,
-        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept {
-        if (try_push(item)) {
+        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept(
+        std::is_nothrow_copy_constructible_v<T>)
+        requires std::copy_constructible<T> {
+        T staged(item);
+        if (try_push(std::move(staged))) {
             return true;
         }
         const bool infinite = (max_wait == std::chrono::microseconds::max());
@@ -165,7 +197,7 @@ public:
                      : (std::chrono::steady_clock::now() + max_wait);
 
         for (int spin = 0; spin < 32; ++spin) {
-            if (try_push(item)) {
+            if (try_push(std::move(staged))) {
                 return true;
             }
             if (spin >= 16) {
@@ -181,19 +213,19 @@ public:
                 const std::uint32_t epoch =
                     not_full_epoch_.load(std::memory_order_acquire);
                 waiters_full_.fetch_add(1, std::memory_order_seq_cst);
-                if (try_push(item)) {
+                if (try_push(std::move(staged))) {
                     waiters_full_.fetch_sub(1, std::memory_order_relaxed);
                     return true;
                 }
                 not_full_epoch_.wait(epoch, std::memory_order_acquire);
                 waiters_full_.fetch_sub(1, std::memory_order_relaxed);
             } else {
-                if (try_push(item)) {
+                if (try_push(std::move(staged))) {
                     return true;
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
-            if (try_push(item)) {
+            if (try_push(std::move(staged))) {
                 return true;
             }
         }

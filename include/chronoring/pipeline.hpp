@@ -68,6 +68,13 @@ struct PipelineStats {
     double mean_ns{0.0};
 };
 
+namespace detail {
+struct alignas(kCacheLineSize) PipelineStampedFrame {
+    EventFrame frame{};
+    std::uint64_t enqueue_steady_ns{0};
+};
+} // namespace detail
+
 class TelemetryPipeline {
 public:
     static constexpr std::size_t kRingCapacity = 16384;
@@ -268,10 +275,7 @@ public:
     [[nodiscard]] const std::string& sink_error() const noexcept { return sink_.last_error(); }
 
 private:
-    struct alignas(kCacheLineSize) StampedFrame {
-        EventFrame frame{};
-        std::uint64_t enqueue_steady_ns{0};
-    };
+    using StampedFrame = detail::PipelineStampedFrame;
 
     static std::uint64_t monotonic_now_ns() noexcept {
         return static_cast<std::uint64_t>(

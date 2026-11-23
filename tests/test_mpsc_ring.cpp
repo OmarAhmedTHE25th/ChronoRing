@@ -9,10 +9,71 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace chronoring::test {
+
+namespace {
+
+template <typename T, std::size_t Cap = 8>
+concept CanInstantiateMpscRing = requires { typename MpscRingBuffer<T, Cap>; };
+
+struct MpscNonDefault {
+    explicit MpscNonDefault(int v) : value(v) {}
+    int value;
+};
+
+struct MpscThrowingDtor {
+    MpscThrowingDtor() = default;
+    MpscThrowingDtor(MpscThrowingDtor&&) noexcept = default;
+    MpscThrowingDtor& operator=(MpscThrowingDtor&&) noexcept = default;
+    ~MpscThrowingDtor() noexcept(false) {}
+};
+
+struct MpscThrowingMoveAssign {
+    MpscThrowingMoveAssign() = default;
+    MpscThrowingMoveAssign(MpscThrowingMoveAssign&&) noexcept = default;
+    MpscThrowingMoveAssign& operator=(MpscThrowingMoveAssign&&) noexcept(false) {
+        return *this;
+    }
+};
+
+struct MaybeThrowingCtorItem {
+    int id{0};
+    bool poison_copy{false};
+
+    MaybeThrowingCtorItem() noexcept = default;
+    explicit MaybeThrowingCtorItem(int v, bool should_throw = false, bool throw_on_copy = false)
+        : id(v), poison_copy(throw_on_copy) {
+        if (should_throw) {
+            throw std::runtime_error("simulated producer construction failure");
+        }
+    }
+    MaybeThrowingCtorItem(const MaybeThrowingCtorItem& other)
+        : id(other.id), poison_copy(other.poison_copy) {
+        if (other.poison_copy) {
+            throw std::runtime_error("simulated producer copy failure");
+        }
+    }
+    MaybeThrowingCtorItem& operator=(const MaybeThrowingCtorItem&) = default;
+    MaybeThrowingCtorItem(MaybeThrowingCtorItem&&) noexcept = default;
+    MaybeThrowingCtorItem& operator=(MaybeThrowingCtorItem&&) noexcept = default;
+    ~MaybeThrowingCtorItem() noexcept = default;
+};
+
+static_assert(CanInstantiateMpscRing<EventFrame, 16>);
+static_assert(CanInstantiateMpscRing<std::unique_ptr<int>, 8>);
+static_assert(CanInstantiateMpscRing<MaybeThrowingCtorItem, 8>);
+static_assert(!CanInstantiateMpscRing<MpscNonDefault, 8>);
+static_assert(!CanInstantiateMpscRing<MpscThrowingDtor, 8>);
+static_assert(!CanInstantiateMpscRing<MpscThrowingMoveAssign, 8>);
+static_assert(!CanInstantiateMpscRing<int, 6>);
+
+} // namespace
 
 TEST(MpscRingTest, SingleThreadedWrapAroundStatusAndSpanPop) {
     MpscRingBuffer<std::uint64_t, 8> ring;
@@ -165,6 +226,29 @@ TEST(LatencyHistogramTest, ConcurrentRecordingAndQuantiles) {
     EXPECT_LE(hist.p99_9(), hist.max_ns());
     EXPECT_NEAR(static_cast<double>(hist.p50()), 50'000.0, 1'000.0);
     EXPECT_NEAR(static_cast<double>(hist.p99()), 99'000.0, 2'000.0);
+}
+
+TEST(MpscRingTest, ThrowingConstructorDoesNotStallConsumer) {
+    MpscRingBuffer<MaybeThrowingCtorItem, 8> ring;
+
+    EXPECT_TRUE(ring.try_emplace(10));
+    EXPECT_THROW((void)ring.try_emplace(99, true), std::runtime_error);
+
+    MaybeThrowingCtorItem copy_poison(77, false, true);
+    EXPECT_THROW((void)ring.try_push(copy_poison), std::runtime_error);
+
+    // Neither enqueue position nor slot sequences were corrupted or left stalled.
+    EXPECT_EQ(ring.size_approx(), 1U);
+    EXPECT_TRUE(ring.try_emplace(20));
+    EXPECT_EQ(ring.size_approx(), 2U);
+
+    MaybeThrowingCtorItem out;
+    ASSERT_TRUE(ring.try_pop(out));
+    EXPECT_EQ(out.id, 10);
+    ASSERT_TRUE(ring.try_pop(out));
+    EXPECT_EQ(out.id, 20);
+    EXPECT_FALSE(ring.try_pop(out));
+    EXPECT_TRUE(ring.empty());
 }
 
 } // namespace chronoring::test

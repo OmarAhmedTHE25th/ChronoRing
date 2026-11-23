@@ -15,11 +15,11 @@ ChronoRing is a standalone, zero-allocation C++20 systems engineering library an
 | SIMD SoA trigger (AVX2) | **422.20 M events/s** (2.40× over scalar) |
 | Hardware CRC32C | **4.97 GiB/s** (22.1× over software) |
 
-Designed for high-rate detector telemetry: wait-free / lock-free rings, SIMD trigger filtering, zero-copy columnar persistence, and formal safety proofs (TLA+ / Lean 4).
+Designed for high-rate detector telemetry: wait-free SPSC / fan-out rings, Vyukov-style MPSC queuing, SIMD trigger filtering, zero-copy columnar persistence, and formal safety proofs (TLA+ / Lean 4).
 
 ChronoRing targets the same constraints found in high-energy physics data acquisition: millions of events per second, strict latency bounds, zero-allocation hot paths, and the need for both high throughput and verifiable integrity. The design deliberately mirrors patterns used in modern DAQ and online systems (lock-free buffering, columnar layouts, SIMD filtering, memory-mapped persistence).
 
-**Formal Verification**: TLA+ specifications and Lean 4 proofs for the core ring-buffer safety properties (no data races, linearizability of the SPSC/MPSC protocols).
+**Formal Verification**: TLA+ specifications and Lean 4 proofs for the core ring-buffer safety properties (no data races, cursor monotonicity, and linearizability of the SPSC/MPSC protocols). Note that strict wait-free / lock-free progress holds on SPSC and `SpscFanOut` channels; `MpscRingBuffer` uses a bounded Vyukov per-slot CAS reservation protocol where a stalled producer mid-write can block consumer progress on that specific slot.
 
 ---
 
@@ -28,7 +28,7 @@ ChronoRing targets the same constraints found in high-energy physics data acquis
 ```text
   Detector / Producer Thread(s)
         │
-        ▼  (Wait-free SPSC / Fan-Out / Vyukov MPSC / POSIX & Win32 SHM IPC)
+        ▼  (Wait-free SPSC / Fan-Out / Bounded Vyukov MPSC / POSIX & Win32 SHM IPC)
   ┌──────────────────────────────────────────────────────────┐
   │  64B Cache-Line Aligned EventFrame Ring Buffer           │
   │  - Shadow index caching, span batching, reserve/commit   │
@@ -60,8 +60,8 @@ ChronoRing targets the same constraints found in high-energy physics data acquis
 | `include/chronoring/chronoring.hpp` | Umbrella header including all ChronoRing C++20 APIs and C ABI declarations. |
 | `include/chronoring/status.hpp` | `RingStatus`, `Expected<T, E>`, `version()`, and lock-free structured `LogCallback` hooks. |
 | `include/chronoring/event_frame.hpp` | 64-byte `EventFrame`, `ColumnarPageHeader`, `ColumnProjectionMask`, and 1024-event `ColumnarPage` (`57,408` bytes). |
-| `include/chronoring/spsc_ring.hpp` | Wait-free `SpscRingBuffer` (shadow caching, `std::span` batching, zero-copy `try_reserve_push`/`try_peek`) + `SpscFanOut`. |
-| `include/chronoring/mpsc_ring.hpp` | Vyukov lock-free `MpscRingBuffer` with adaptive spin/yield/`std::atomic::wait` (`push_wait`/`pop_wait`). |
+| `include/chronoring/spsc_ring.hpp` | Wait-free `SpscRingBuffer` (shadow caching, `std::span` batching, RAII `reserve_push`/`reserve_pop` & `try_reserve_push`/`try_peek`) + wait-free `SpscFanOut`. |
+| `include/chronoring/mpsc_ring.hpp` | Bounded Vyukov-style `MpscRingBuffer` (lock-free CAS slot reservation, exception-safe pre-CAS construction; a producer stalled mid-write can block that slot) with adaptive spin/yield/`std::atomic::wait`. |
 | `include/chronoring/mpmc_ring.hpp` | Lock-free `MpmcRingBuffer` and arbitrary M:N `RingTopologyRouter` (`Broadcast`, `RoundRobin`, `PredicateFiltered`). |
 | `include/chronoring/shm_ring.hpp` | Cross-process shared-memory ring (`shm_open`/`mmap` on POSIX, `CreateFileMapping` on Win32) + `ShmScopeGuard`. |
 | `include/chronoring/pcie_cxl_ring.hpp` | Direct PCIe BAR / VFIO / CXL.mem DAX zero-CPU FPGA DMA ring (`PcieCxlRing`, `MockFpgaDmaProducer`). |

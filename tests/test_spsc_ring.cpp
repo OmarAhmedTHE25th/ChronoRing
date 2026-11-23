@@ -13,11 +13,44 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace chronoring::test {
 
 namespace {
+
+template <typename T, std::size_t Cap = 8>
+concept CanInstantiateSpscRing = requires { typename SpscRingBuffer<T, Cap>; };
+
+struct NonDefaultConstructible {
+    explicit NonDefaultConstructible(int v) : value(v) {}
+    int value;
+};
+
+struct NonMovable {
+    NonMovable() = default;
+    NonMovable(const NonMovable&) = delete;
+    NonMovable& operator=(const NonMovable&) = delete;
+    NonMovable(NonMovable&&) = delete;
+    NonMovable& operator=(NonMovable&&) = delete;
+};
+
+struct ThrowingDestructor {
+    ThrowingDestructor() = default;
+    ThrowingDestructor(ThrowingDestructor&&) = default;
+    ThrowingDestructor& operator=(ThrowingDestructor&&) = default;
+    ~ThrowingDestructor() noexcept(false) {}
+};
+
+static_assert(CanInstantiateSpscRing<int, 8>);
+static_assert(CanInstantiateSpscRing<EventFrame, 16>);
+static_assert(CanInstantiateSpscRing<std::unique_ptr<int>, 8>);
+static_assert(!CanInstantiateSpscRing<NonDefaultConstructible, 8>);
+static_assert(!CanInstantiateSpscRing<NonMovable, 8>);
+static_assert(!CanInstantiateSpscRing<ThrowingDestructor, 8>);
+static_assert(!CanInstantiateSpscRing<int, 7>);
 
 EventFrame make_frame(std::uint64_t seq) noexcept {
     EventFrame f{};
@@ -249,5 +282,126 @@ TEST(SpscRingTest, CApiSurfaceSmoke) {
 
     chronoring_spsc_destroy(ring);
 }
+
+TEST(SpscRingTest, RaiiWriteAndReadReservations) {
+    SpscRingBuffer<std::unique_ptr<int>, 4> ring;
+
+    // 1. Auto-commit on WriteReservation destruction
+    {
+        auto write_guard = ring.reserve_push();
+        ASSERT_TRUE(write_guard);
+        *write_guard = std::make_unique<int>(101);
+        EXPECT_EQ(ring.size_approx(), 0U);
+    }
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    // 2. Explicit idempotent commit + move transfer
+    {
+        auto g1 = ring.reserve_push();
+        ASSERT_TRUE(g1);
+        *g1 = std::make_unique<int>(202);
+        auto g2 = std::move(g1);
+        EXPECT_FALSE(g1);
+        ASSERT_TRUE(g2);
+        g2.commit();
+        g2.commit(); // idempotent no-op
+    }
+    EXPECT_EQ(ring.size_approx(), 2U);
+
+    // 3. Move-assignment commits previously held write reservation
+    {
+        auto g1 = ring.reserve_push();
+        ASSERT_TRUE(g1);
+        *g1 = std::make_unique<int>(303);
+        auto g2 = std::move(g1);
+
+        // Push a third slot via auto-committed move-assignment target
+        g1 = std::move(g2);
+        EXPECT_FALSE(g2);
+        ASSERT_TRUE(g1);
+    }
+    EXPECT_EQ(ring.size_approx(), 3U);
+
+    // 4. Fill final slot and check full reservation returns empty guard
+    {
+        auto g4 = ring.reserve_push();
+        ASSERT_TRUE(g4);
+        *g4 = std::make_unique<int>(404);
+    }
+    EXPECT_EQ(ring.size_approx(), 4U);
+    EXPECT_FALSE(ring.reserve_push());
+
+    // 5. ReadReservation auto-consume, move, and idempotent commit
+    {
+        auto read_guard = ring.reserve_pop();
+        ASSERT_TRUE(read_guard);
+        EXPECT_EQ(**read_guard, 101);
+        auto moved_read = std::move(read_guard);
+        EXPECT_FALSE(read_guard);
+        moved_read.commit();
+        moved_read.commit();
+    }
+    EXPECT_EQ(ring.size_approx(), 3U);
+
+    for (int expected : {202, 303, 404}) {
+        auto r = ring.reserve_pop();
+        ASSERT_TRUE(r);
+        EXPECT_EQ(**r, expected);
+    }
+    EXPECT_TRUE(ring.empty());
+    EXPECT_FALSE(ring.reserve_pop());
+}
+
+#ifndef NDEBUG
+TEST(SpscRingDeathTest, CommitWithoutReservationAndDoubleCommitAbort) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    using Ring4 = SpscRingBuffer<int, 4>;
+
+    EXPECT_DEATH(
+        {
+            Ring4 ring;
+            ring.commit_push();
+        },
+        "commit_push\\(\\) called without an active write reservation");
+
+    EXPECT_DEATH(
+        {
+            Ring4 ring;
+            int* slot = ring.try_reserve_push();
+            if (slot != nullptr) {
+                *slot = 7;
+                ring.commit_push();
+                ring.commit_push();
+            }
+        },
+        "commit_push\\(\\) called without an active write reservation");
+
+    EXPECT_DEATH(
+        {
+            Ring4 ring;
+            (void)ring.try_reserve_push();
+            (void)ring.try_reserve_push();
+        },
+        "try_reserve_push\\(\\) called while a write reservation is already active");
+
+    EXPECT_DEATH(
+        {
+            Ring4 ring;
+            (void)ring.try_push(1);
+            ring.consume_pop();
+        },
+        "consume_pop\\(\\) called without an active read reservation");
+
+    EXPECT_DEATH(
+        {
+            Ring4 ring;
+            (void)ring.try_push(1);
+            (void)ring.try_peek();
+            ring.consume_pop();
+            ring.consume_pop();
+        },
+        "consume_pop\\(\\) called without an active read reservation");
+}
+#endif
 
 } // namespace chronoring::test
