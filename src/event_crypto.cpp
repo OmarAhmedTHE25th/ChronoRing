@@ -409,25 +409,40 @@ Sha256Digest compute_flag_trapdoor(std::uint32_t quality_flags,
     return hmac_sha256(trapdoor_key, msg);
 }
 
-std::uint32_t DetectorEncryptor::generate_random_session_id() noexcept {
+Expected<std::uint32_t, RingStatus> DetectorEncryptor::generate_random_session_id() noexcept {
     try {
         std::random_device rd;
         const std::uint32_t a = static_cast<std::uint32_t>(rd());
         const std::uint32_t b = static_cast<std::uint32_t>(rd());
         return a ^ std::rotl(b, 16);
     } catch (...) {
-        return 0x5A3C96A5U;
+        return unexpected(RingStatus::IoError);
+    }
+}
+
+DetectorEncryptor::DetectorEncryptor(const DetectorKeyVault& vault) noexcept
+    : vault_(&vault), counter_(0) {
+    const auto sid = generate_random_session_id();
+    if (sid.has_value()) {
+        session_id_ = *sid;
+        session_valid_ = true;
+    } else {
+        session_id_ = 0;
+        session_valid_ = false;
     }
 }
 
 DetectorEncryptor::DetectorEncryptor(const DetectorKeyVault& vault,
                                      std::uint32_t session_id) noexcept
-    : vault_(&vault), session_id_(session_id), counter_(0) {}
+    : vault_(&vault), session_id_(session_id), session_valid_(true), counter_(0) {}
 
 Expected<EncryptedEventFrame, RingStatus> DetectorEncryptor::encrypt(
     const EventFrame& frame) noexcept {
     if (vault_ == nullptr) {
         return unexpected(RingStatus::InvalidArgument);
+    }
+    if (!session_valid_) {
+        return unexpected(RingStatus::IoError);
     }
     const auto aead_key_res = vault_->get_aead_key(frame.detector_id);
     if (!aead_key_res.has_value()) {

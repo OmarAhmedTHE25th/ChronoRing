@@ -129,7 +129,12 @@ TEST(ExtremeFeaturesTest, ChaCha20Poly1305SubkeySeparationNoncesAndTrapdoors) {
     const auto trapdoor = make_encrypted_flag_trapdoor(0, vault);
     ASSERT_TRUE(trapdoor.has_value());
 
+    DetectorEncryptor rand_encryptor(vault);
+    ASSERT_TRUE(rand_encryptor.is_valid());
+    EXPECT_TRUE(DetectorEncryptor::generate_random_session_id().has_value());
+
     DetectorEncryptor encryptor(vault, 0x11223344U);
+    EXPECT_TRUE(encryptor.is_valid());
 
     // Encrypting the EXACT SAME (detector_id, sequence_id) frame twice MUST yield
     // distinct nonces and distinct ciphertexts (stateful counter prevents nonce reuse).

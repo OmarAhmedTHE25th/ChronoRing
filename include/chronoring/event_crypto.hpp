@@ -91,8 +91,13 @@ struct EncryptedFlagTrapdoor {
 //   should rotate keys or ensure distinct `session_id` values per producer/session.
 class DetectorEncryptor {
 public:
+    // Generates a random 32-bit session ID via std::random_device.
+    // If random_device fails, `is_valid()` is false and `encrypt()` fails closed
+    // with `RingStatus::IoError` rather than falling back to a constant.
+    explicit DetectorEncryptor(const DetectorKeyVault& vault) noexcept;
+
     explicit DetectorEncryptor(const DetectorKeyVault& vault,
-                               std::uint32_t session_id = generate_random_session_id()) noexcept;
+                               std::uint32_t session_id) noexcept;
 
     DetectorEncryptor(const DetectorEncryptor&) = delete;
     DetectorEncryptor& operator=(const DetectorEncryptor&) = delete;
@@ -100,16 +105,21 @@ public:
     [[nodiscard]] Expected<EncryptedEventFrame, RingStatus> encrypt(
         const EventFrame& frame) noexcept;
 
+    [[nodiscard]] bool is_valid() const noexcept {
+        return vault_ != nullptr && session_valid_;
+    }
     [[nodiscard]] std::uint32_t session_id() const noexcept { return session_id_; }
     [[nodiscard]] std::uint64_t next_counter() const noexcept {
         return counter_.load(std::memory_order_relaxed);
     }
 
-    [[nodiscard]] static std::uint32_t generate_random_session_id() noexcept;
+    [[nodiscard]] static Expected<std::uint32_t, RingStatus>
+    generate_random_session_id() noexcept;
 
 private:
     const DetectorKeyVault* vault_;
-    std::uint32_t session_id_;
+    std::uint32_t session_id_{0};
+    bool session_valid_{false};
     std::atomic<std::uint64_t> counter_{0};
 };
 

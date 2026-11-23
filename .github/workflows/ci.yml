@@ -85,13 +85,11 @@ jobs:
           test -s build/report.json
 
       - name: Run Python test suites
-        if: matrix.build_type == 'Release'
+        if: contains(matrix.cmake_flags, 'CHRONORING_BUILD_SHARED=ON')
         env:
           CXX: ${{ matrix.cxx }}
         run: |
-          if [ -f build/libchronoring_core.so ]; then
-            PYTHONPATH=python CHRONORING_LIB=build/libchronoring_core.so python3 python/examples/quickstart.py
-          fi
+          PYTHONPATH=python CHRONORING_LIB=build/libchronoring_core.so python3 python/examples/quickstart.py
           python3 tests/test_observability_python.py
           python3 tests/test_ddl_codegen.py
           python3 tests/test_selfhost.py
