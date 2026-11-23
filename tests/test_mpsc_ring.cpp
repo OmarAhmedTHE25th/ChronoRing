@@ -42,6 +42,13 @@ struct MpscThrowingMoveAssign {
     }
 };
 
+struct NonTrivialThrowingDefaultMpsc {
+    NonTrivialThrowingDefaultMpsc() noexcept(false) {}
+    NonTrivialThrowingDefaultMpsc(NonTrivialThrowingDefaultMpsc&&) noexcept = default;
+    NonTrivialThrowingDefaultMpsc& operator=(NonTrivialThrowingDefaultMpsc&&) noexcept = default;
+    ~NonTrivialThrowingDefaultMpsc() noexcept {}
+};
+
 struct MaybeThrowingCtorItem {
     int id{0};
     bool poison_copy{false};
@@ -68,10 +75,23 @@ struct MaybeThrowingCtorItem {
 static_assert(CanInstantiateMpscRing<EventFrame, 16>);
 static_assert(CanInstantiateMpscRing<std::unique_ptr<int>, 8>);
 static_assert(CanInstantiateMpscRing<MaybeThrowingCtorItem, 8>);
+static_assert(CanInstantiateMpscRing<NonTrivialThrowingDefaultMpsc, 8>);
 static_assert(!CanInstantiateMpscRing<MpscNonDefault, 8>);
 static_assert(!CanInstantiateMpscRing<MpscThrowingDtor, 8>);
 static_assert(!CanInstantiateMpscRing<MpscThrowingMoveAssign, 8>);
 static_assert(!CanInstantiateMpscRing<int, 6>);
+
+static_assert(noexcept(std::declval<MpscRingBuffer<EventFrame, 8>&>().try_pop(
+    std::declval<EventFrame&>())));
+static_assert(noexcept(std::declval<MpscRingBuffer<EventFrame, 8>&>().try_pop_batch(nullptr, 0)));
+static_assert(noexcept(std::declval<MpscRingBuffer<std::uint64_t, 8>&>().pop_wait(
+    std::declval<std::uint64_t&>())));
+static_assert(!noexcept(std::declval<MpscRingBuffer<NonTrivialThrowingDefaultMpsc, 8>&>().try_pop(
+    std::declval<NonTrivialThrowingDefaultMpsc&>())));
+static_assert(!noexcept(
+    std::declval<MpscRingBuffer<NonTrivialThrowingDefaultMpsc, 8>&>().try_pop_batch(nullptr, 0)));
+static_assert(!noexcept(std::declval<MpscRingBuffer<NonTrivialThrowingDefaultMpsc, 8>&>().pop_wait(
+    std::declval<NonTrivialThrowingDefaultMpsc&>())));
 
 } // namespace
 

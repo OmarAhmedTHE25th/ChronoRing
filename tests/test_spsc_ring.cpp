@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -44,13 +45,37 @@ struct ThrowingDestructor {
     ~ThrowingDestructor() noexcept(false) {}
 };
 
+struct NonTrivialThrowingDefault {
+    NonTrivialThrowingDefault() noexcept(false) {}
+    NonTrivialThrowingDefault(NonTrivialThrowingDefault&&) noexcept = default;
+    NonTrivialThrowingDefault& operator=(NonTrivialThrowingDefault&&) noexcept = default;
+    ~NonTrivialThrowingDefault() noexcept {}
+};
+
 static_assert(CanInstantiateSpscRing<int, 8>);
 static_assert(CanInstantiateSpscRing<EventFrame, 16>);
 static_assert(CanInstantiateSpscRing<std::unique_ptr<int>, 8>);
+static_assert(CanInstantiateSpscRing<NonTrivialThrowingDefault, 8>);
 static_assert(!CanInstantiateSpscRing<NonDefaultConstructible, 8>);
 static_assert(!CanInstantiateSpscRing<NonMovable, 8>);
 static_assert(!CanInstantiateSpscRing<ThrowingDestructor, 8>);
 static_assert(!CanInstantiateSpscRing<int, 7>);
+
+static_assert(noexcept(std::declval<SpscRingBuffer<EventFrame, 8>&>().consume_pop()));
+static_assert(noexcept(std::declval<SpscRingBuffer<EventFrame, 8>&>().try_pop(
+    std::declval<EventFrame&>())));
+static_assert(noexcept(std::declval<SpscRingBuffer<EventFrame, 8>&>().try_pop_batch(nullptr, 0)));
+static_assert(noexcept(
+    std::declval<SpscRingBuffer<EventFrame, 8>::ReadReservation&>().commit()));
+
+static_assert(!noexcept(
+    std::declval<SpscRingBuffer<NonTrivialThrowingDefault, 8>&>().consume_pop()));
+static_assert(!noexcept(std::declval<SpscRingBuffer<NonTrivialThrowingDefault, 8>&>().try_pop(
+    std::declval<NonTrivialThrowingDefault&>())));
+static_assert(!noexcept(
+    std::declval<SpscRingBuffer<NonTrivialThrowingDefault, 8>&>().try_pop_batch(nullptr, 0)));
+static_assert(!noexcept(
+    std::declval<SpscRingBuffer<NonTrivialThrowingDefault, 8>::ReadReservation&>().commit()));
 
 EventFrame make_frame(std::uint64_t seq) noexcept {
     EventFrame f{};
@@ -286,60 +311,73 @@ TEST(SpscRingTest, CApiSurfaceSmoke) {
 TEST(SpscRingTest, RaiiWriteAndReadReservations) {
     SpscRingBuffer<std::unique_ptr<int>, 4> ring;
 
-    // 1. Auto-commit on WriteReservation destruction
+    // 1. Dropping an uncommitted WriteReservation cancels cleanly without publishing
     {
-        auto write_guard = ring.reserve_push();
-        ASSERT_TRUE(write_guard);
-        *write_guard = std::make_unique<int>(101);
+        auto uncommitted = ring.reserve_push();
+        ASSERT_TRUE(uncommitted);
+        *uncommitted = std::make_unique<int>(999);
         EXPECT_EQ(ring.size_approx(), 0U);
     }
-    EXPECT_EQ(ring.size_approx(), 1U);
+    EXPECT_TRUE(ring.empty());
 
-    // 2. Explicit idempotent commit + move transfer
+    // 2. Explicit commit + idempotency + move transfer
     {
         auto g1 = ring.reserve_push();
         ASSERT_TRUE(g1);
-        *g1 = std::make_unique<int>(202);
+        *g1 = std::make_unique<int>(101);
         auto g2 = std::move(g1);
         EXPECT_FALSE(g1);
         ASSERT_TRUE(g2);
+        EXPECT_EQ(ring.size_approx(), 0U);
         g2.commit();
         g2.commit(); // idempotent no-op
     }
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    // 3. Move-assignment cancels any currently held uncommitted reservation before moving
+    {
+        auto held_uncommitted = ring.reserve_push();
+        ASSERT_TRUE(held_uncommitted);
+        *held_uncommitted = std::make_unique<int>(888);
+
+        // Move-assign an empty guard: cancels `held_uncommitted` without publishing
+        held_uncommitted = SpscRingBuffer<std::unique_ptr<int>, 4>::WriteReservation{};
+        EXPECT_FALSE(held_uncommitted);
+        EXPECT_EQ(ring.size_approx(), 1U);
+
+        auto g2 = ring.reserve_push();
+        ASSERT_TRUE(g2);
+        *g2 = std::make_unique<int>(202);
+        g2.commit();
+    }
     EXPECT_EQ(ring.size_approx(), 2U);
 
-    // 3. Move-assignment commits previously held write reservation
-    {
-        auto g1 = ring.reserve_push();
-        ASSERT_TRUE(g1);
-        *g1 = std::make_unique<int>(303);
-        auto g2 = std::move(g1);
-
-        // Push a third slot via auto-committed move-assignment target
-        g1 = std::move(g2);
-        EXPECT_FALSE(g2);
-        ASSERT_TRUE(g1);
-    }
-    EXPECT_EQ(ring.size_approx(), 3U);
-
-    // 4. Fill final slot and check full reservation returns empty guard
-    {
-        auto g4 = ring.reserve_push();
-        ASSERT_TRUE(g4);
-        *g4 = std::make_unique<int>(404);
+    for (int v : {303, 404}) {
+        auto g = ring.reserve_push();
+        ASSERT_TRUE(g);
+        *g = std::make_unique<int>(v);
+        g.commit();
     }
     EXPECT_EQ(ring.size_approx(), 4U);
     EXPECT_FALSE(ring.reserve_push());
 
-    // 5. ReadReservation auto-consume, move, and idempotent commit
+    // 4. Dropping an uncommitted ReadReservation cancels without consuming the item
     {
-        auto read_guard = ring.reserve_pop();
-        ASSERT_TRUE(read_guard);
-        EXPECT_EQ(**read_guard, 101);
-        auto moved_read = std::move(read_guard);
-        EXPECT_FALSE(read_guard);
-        moved_read.commit();
-        moved_read.commit();
+        auto read_uncommitted = ring.reserve_pop();
+        ASSERT_TRUE(read_uncommitted);
+        EXPECT_EQ(**read_uncommitted, 101);
+    }
+    EXPECT_EQ(ring.size_approx(), 4U);
+
+    // 5. Explicit ReadReservation commit & move semantics
+    {
+        auto r1 = ring.reserve_pop();
+        ASSERT_TRUE(r1);
+        EXPECT_EQ(**r1, 101);
+        auto r2 = std::move(r1);
+        EXPECT_FALSE(r1);
+        r2.commit();
+        r2.commit();
     }
     EXPECT_EQ(ring.size_approx(), 3U);
 
@@ -347,9 +385,41 @@ TEST(SpscRingTest, RaiiWriteAndReadReservations) {
         auto r = ring.reserve_pop();
         ASSERT_TRUE(r);
         EXPECT_EQ(**r, expected);
+        r.commit();
     }
     EXPECT_TRUE(ring.empty());
     EXPECT_FALSE(ring.reserve_pop());
+}
+
+TEST(SpscRingTest, ExceptionDuringWriteReservationCancelsCleanly) {
+    SpscRingBuffer<EventFrame, 4> ring;
+
+    EXPECT_THROW(
+        {
+            auto guard = ring.reserve_push();
+            EXPECT_TRUE(guard);
+            guard->sequence_id = 777U;
+            guard->energy_mev = 123.0f;
+            throw std::runtime_error("simulated populate failure");
+        },
+        std::runtime_error);
+
+    // Partial item was NOT committed on stack unwind, and Debug reservation state was cleared
+    EXPECT_TRUE(ring.empty());
+    EXPECT_FALSE(ring.reserve_pop());
+
+    // Subsequent reservation & explicit commit succeed normally
+    auto next = ring.reserve_push();
+    ASSERT_TRUE(next);
+    *next = make_frame(888U);
+    next.commit();
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    auto read = ring.reserve_pop();
+    ASSERT_TRUE(read);
+    EXPECT_EQ(read->sequence_id, 888U);
+    read.commit();
+    EXPECT_TRUE(ring.empty());
 }
 
 #ifndef NDEBUG

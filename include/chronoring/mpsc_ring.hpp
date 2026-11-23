@@ -50,6 +50,9 @@ class MpscRingBuffer {
 public:
     static constexpr std::size_t kCapacity = Capacity;
     static constexpr std::size_t kMask = Capacity - 1;
+    static constexpr bool kSlotResetNothrow =
+        std::is_trivially_destructible_v<T> ||
+        (std::is_nothrow_default_constructible_v<T> && std::is_nothrow_move_assignable_v<T>);
 
     MpscRingBuffer() noexcept {
         for (std::size_t i = 0; i < Capacity; ++i) {
@@ -68,8 +71,7 @@ public:
         return try_push(item) ? RingStatus::Ok : RingStatus::Full;
     }
 
-    [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(
-        std::is_trivially_destructible_v<T> || std::is_nothrow_default_constructible_v<T>) {
+    [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(kSlotResetNothrow) {
         return try_pop(out) ? RingStatus::Ok : RingStatus::Empty;
     }
 
@@ -118,8 +120,7 @@ public:
         return try_push(std::move(value));
     }
 
-    [[nodiscard]] bool try_pop(T& out) noexcept(
-        std::is_trivially_destructible_v<T> || std::is_nothrow_default_constructible_v<T>) {
+    [[nodiscard]] bool try_pop(T& out) noexcept(kSlotResetNothrow) {
         const std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
         Slot& slot = slots_[pos & kMask];
         const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
@@ -143,7 +144,7 @@ public:
     }
 
     [[nodiscard]] std::size_t try_pop_batch(T* out, std::size_t max_count) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+        kSlotResetNothrow) {
         if (max_count == 0 || out == nullptr) {
             return 0;
         }
@@ -176,8 +177,7 @@ public:
         return popped;
     }
 
-    [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+    [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(kSlotResetNothrow) {
         return try_pop_batch(out.data(), out.size());
     }
 
@@ -234,7 +234,8 @@ public:
     // Blocking pop with adaptive spin -> yield -> futex (std::atomic::wait) backoff.
     [[nodiscard]] bool pop_wait(
         T& out,
-        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept {
+        std::chrono::microseconds max_wait = std::chrono::microseconds::max()) noexcept(
+        kSlotResetNothrow) {
         if (try_pop(out)) {
             return true;
         }

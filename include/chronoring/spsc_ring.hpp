@@ -43,6 +43,11 @@ class SpscRingBuffer {
 public:
     static constexpr std::size_t kCapacity = Capacity;
     static constexpr std::size_t kMask = Capacity - 1;
+    static constexpr bool kSlotResetNothrow =
+        std::is_trivially_destructible_v<T> ||
+        (std::is_nothrow_default_constructible_v<T> && std::is_nothrow_move_assignable_v<T>);
+    static constexpr bool kPopNothrow =
+        std::is_nothrow_move_assignable_v<T> && kSlotResetNothrow;
 
     SpscRingBuffer() = default;
     SpscRingBuffer(const SpscRingBuffer&) = delete;
@@ -65,8 +70,7 @@ public:
         return try_push(item) ? RingStatus::Ok : RingStatus::Full;
     }
 
-    [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+    [[nodiscard]] RingStatus try_pop_status(T& out) noexcept(kPopNothrow) {
         return try_pop(out) ? RingStatus::Ok : RingStatus::Empty;
     }
 
@@ -153,6 +157,14 @@ public:
         prod_.head.store(head + 1, std::memory_order_release);
     }
 
+    void cancel_push() noexcept {
+#ifndef NDEBUG
+        assert(prod_.has_active_write_reservation &&
+               "cancel_push() called without an active write reservation");
+        prod_.has_active_write_reservation = false;
+#endif
+    }
+
     // Zero-copy consumer peek: call `consume_pop()` when finished reading `*ptr`.
     [[nodiscard]] const T* try_peek() noexcept {
 #ifndef NDEBUG
@@ -172,7 +184,7 @@ public:
         return &buffer_[tail & kMask];
     }
 
-    void consume_pop() noexcept {
+    void consume_pop() noexcept(kSlotResetNothrow) {
 #ifndef NDEBUG
         assert(cons_.has_active_read_reservation &&
                "consume_pop() called without an active read reservation");
@@ -185,8 +197,17 @@ public:
         cons_.tail.store(tail + 1, std::memory_order_release);
     }
 
+    void cancel_pop() noexcept {
+#ifndef NDEBUG
+        assert(cons_.has_active_read_reservation &&
+               "cancel_pop() called without an active read reservation");
+        cons_.has_active_read_reservation = false;
+#endif
+    }
+
     // Move-only RAII guard for zero-copy SPSC producer/consumer reservations.
-    // Automatically commits on destruction unless already committed via `.commit()`.
+    // Call `.commit()` explicitly to publish/consume; uncommitted guards are
+    // cancelled on destruction so stack unwinding never publishes partial state.
     template <bool IsWrite>
     class BasicReservation {
     public:
@@ -203,26 +224,38 @@ public:
 
         BasicReservation& operator=(BasicReservation&& other) noexcept {
             if (this != &other) {
-                commit();
+                cancel();
                 ring_ = std::exchange(other.ring_, nullptr);
                 slot_ = std::exchange(other.slot_, nullptr);
             }
             return *this;
         }
 
-        ~BasicReservation() {
-            commit();
+        ~BasicReservation() noexcept {
+            cancel();
         }
 
-        void commit() noexcept {
-            if (ring_ != nullptr) {
+        void cancel() noexcept {
+            auto* ring = std::exchange(ring_, nullptr);
+            slot_ = nullptr;
+            if (ring != nullptr) {
                 if constexpr (IsWrite) {
-                    ring_->commit_push();
+                    ring->cancel_push();
                 } else {
-                    ring_->consume_pop();
+                    ring->cancel_pop();
                 }
-                ring_ = nullptr;
-                slot_ = nullptr;
+            }
+        }
+
+        void commit() noexcept(IsWrite || kSlotResetNothrow) {
+            auto* ring = std::exchange(ring_, nullptr);
+            slot_ = nullptr;
+            if (ring != nullptr) {
+                if constexpr (IsWrite) {
+                    ring->commit_push();
+                } else {
+                    ring->consume_pop();
+                }
             }
         }
 
@@ -254,7 +287,7 @@ public:
         return ptr != nullptr ? ReadReservation(this, ptr) : ReadReservation();
     }
 
-    [[nodiscard]] bool try_pop(T& out) noexcept(std::is_nothrow_move_assignable_v<T>) {
+    [[nodiscard]] bool try_pop(T& out) noexcept(kPopNothrow) {
 #ifndef NDEBUG
         assert(!cons_.has_active_read_reservation &&
                "try_pop() called while an active read reservation is held");
@@ -309,7 +342,7 @@ public:
     }
 
     [[nodiscard]] std::size_t try_pop_batch(T* out, std::size_t max_count) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+        kPopNothrow) {
 #ifndef NDEBUG
         assert(!cons_.has_active_read_reservation &&
                "try_pop_batch() called while an active read reservation is held");
@@ -338,8 +371,7 @@ public:
         return to_pop;
     }
 
-    [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+    [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(kPopNothrow) {
         return try_pop_batch(out.data(), out.size());
     }
 
@@ -427,7 +459,7 @@ public:
     }
 
     [[nodiscard]] bool try_pop(std::size_t consumer_idx, T& out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+        SpscRingBuffer<T, Capacity>::kPopNothrow) {
         if (consumer_idx >= NumConsumers) {
             return false;
         }
@@ -435,7 +467,7 @@ public:
     }
 
     [[nodiscard]] std::size_t try_pop_batch(std::size_t consumer_idx, std::span<T> out) noexcept(
-        std::is_nothrow_move_assignable_v<T>) {
+        SpscRingBuffer<T, Capacity>::kPopNothrow) {
         if (consumer_idx >= NumConsumers) {
             return 0;
         }
