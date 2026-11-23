@@ -299,11 +299,7 @@ public:
                 return false;
             }
         }
-        const std::size_t slot_idx = tail & kMask;
-        out = std::move(buffer_[slot_idx]);
-        if constexpr (!std::is_trivially_destructible_v<T>) {
-            buffer_[slot_idx] = T{};
-        }
+        pop_slot_strong(buffer_[tail & kMask], out);
         cons_.tail.store(tail + 1, std::memory_order_release);
         return true;
     }
@@ -360,15 +356,26 @@ public:
         if (to_pop == 0) {
             return 0;
         }
-        for (std::size_t i = 0; i < to_pop; ++i) {
-            const std::size_t slot_idx = (tail + i) & kMask;
-            out[i] = std::move(buffer_[slot_idx]);
-            if constexpr (!std::is_trivially_destructible_v<T>) {
-                buffer_[slot_idx] = T{};
+        std::size_t popped = 0;
+        auto pop_loop = [&]() {
+            for (; popped < to_pop; ++popped) {
+                pop_slot_strong(buffer_[(tail + popped) & kMask], out[popped]);
+            }
+        };
+        if constexpr (kPopNothrow) {
+            pop_loop();
+        } else {
+            try {
+                pop_loop();
+            } catch (...) {
+                if (popped > 0) {
+                    cons_.tail.store(tail + popped, std::memory_order_release);
+                }
+                throw;
             }
         }
-        cons_.tail.store(tail + to_pop, std::memory_order_release);
-        return to_pop;
+        cons_.tail.store(tail + popped, std::memory_order_release);
+        return popped;
     }
 
     [[nodiscard]] std::size_t try_pop_batch(std::span<T> out) noexcept(kPopNothrow) {
@@ -394,6 +401,18 @@ public:
     }
 
 private:
+    static void pop_slot_strong(T& slot, T& out) noexcept(kPopNothrow) {
+        if constexpr (std::is_trivially_destructible_v<T>) {
+            out = std::move(slot);
+        } else {
+            // Prepare empty replacement before moving from `slot` so a throwing
+            // default constructor leaves `slot` and `out` untouched.
+            T empty_slot{};
+            out = std::move(slot);
+            slot = std::move(empty_slot);
+        }
+    }
+
     struct alignas(kCacheLineSize) ProducerState {
         std::atomic<std::size_t> head{0};
         std::size_t cached_tail{0};

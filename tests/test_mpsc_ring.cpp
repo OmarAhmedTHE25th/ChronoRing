@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -47,6 +48,45 @@ struct NonTrivialThrowingDefaultMpsc {
     NonTrivialThrowingDefaultMpsc(NonTrivialThrowingDefaultMpsc&&) noexcept = default;
     NonTrivialThrowingDefaultMpsc& operator=(NonTrivialThrowingDefaultMpsc&&) noexcept = default;
     ~NonTrivialThrowingDefaultMpsc() noexcept {}
+};
+
+struct ResetThrowTrackerMpsc {
+    static inline bool throw_next_default = false;
+    static inline int default_calls_before_throw = -1;
+
+    int value{0};
+    bool moved_from{false};
+
+    ResetThrowTrackerMpsc() {
+        if (default_calls_before_throw == 0 || throw_next_default) {
+            throw_next_default = false;
+            default_calls_before_throw = -1;
+            throw std::runtime_error("simulated default construction failure on slot reset");
+        }
+        if (default_calls_before_throw > 0) {
+            --default_calls_before_throw;
+        }
+    }
+
+    explicit ResetThrowTrackerMpsc(int v) noexcept : value(v), moved_from(false) {}
+
+    ResetThrowTrackerMpsc(ResetThrowTrackerMpsc&& other) noexcept
+        : value(other.value), moved_from(false) {
+        other.value = -1;
+        other.moved_from = true;
+    }
+
+    ResetThrowTrackerMpsc& operator=(ResetThrowTrackerMpsc&& other) noexcept {
+        if (this != &other) {
+            value = other.value;
+            moved_from = false;
+            other.value = -1;
+            other.moved_from = true;
+        }
+        return *this;
+    }
+
+    ~ResetThrowTrackerMpsc() noexcept {}
 };
 
 struct MaybeThrowingCtorItem {
@@ -269,6 +309,50 @@ TEST(MpscRingTest, ThrowingConstructorDoesNotStallConsumer) {
     EXPECT_EQ(out.id, 20);
     EXPECT_FALSE(ring.try_pop(out));
     EXPECT_TRUE(ring.empty());
+}
+
+TEST(MpscRingTest, StrongExceptionSafetyWhenSlotResetThrows) {
+    ResetThrowTrackerMpsc::throw_next_default = false;
+    ResetThrowTrackerMpsc::default_calls_before_throw = -1;
+
+    MpscRingBuffer<ResetThrowTrackerMpsc, 8> ring;
+    ASSERT_TRUE(ring.try_emplace(42));
+
+    ResetThrowTrackerMpsc out(-99);
+    ResetThrowTrackerMpsc::throw_next_default = true;
+    EXPECT_THROW((void)ring.try_pop(out), std::runtime_error);
+
+    // Slot remains unmoved, `out` is untouched, and dequeue_pos_ did not advance.
+    EXPECT_EQ(out.value, -99);
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    ASSERT_TRUE(ring.try_pop(out));
+    EXPECT_EQ(out.value, 42);
+    EXPECT_FALSE(out.moved_from);
+    EXPECT_TRUE(ring.empty());
+
+    // Batch pop: second item throws on slot reset -> first item commits cleanly,
+    // second item remains intact in its slot.
+    ASSERT_TRUE(ring.try_emplace(111));
+    ASSERT_TRUE(ring.try_emplace(222));
+
+    std::array<ResetThrowTrackerMpsc, 2> batch_out{
+        ResetThrowTrackerMpsc(-99), ResetThrowTrackerMpsc(-99)};
+    ResetThrowTrackerMpsc::default_calls_before_throw = 1;
+    EXPECT_THROW((void)ring.try_pop_batch(batch_out.data(), 2), std::runtime_error);
+
+    EXPECT_EQ(batch_out[0].value, 111);
+    EXPECT_EQ(batch_out[1].value, -99);
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    ResetThrowTrackerMpsc retry(-99);
+    ASSERT_TRUE(ring.try_pop(retry));
+    EXPECT_EQ(retry.value, 222);
+    EXPECT_FALSE(retry.moved_from);
+    EXPECT_TRUE(ring.empty());
+
+    ResetThrowTrackerMpsc::throw_next_default = false;
+    ResetThrowTrackerMpsc::default_calls_before_throw = -1;
 }
 
 } // namespace chronoring::test

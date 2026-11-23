@@ -52,6 +52,45 @@ struct NonTrivialThrowingDefault {
     ~NonTrivialThrowingDefault() noexcept {}
 };
 
+struct ResetThrowTracker {
+    static inline bool throw_next_default = false;
+    static inline int default_calls_before_throw = -1;
+
+    int value{0};
+    bool moved_from{false};
+
+    ResetThrowTracker() {
+        if (default_calls_before_throw == 0 || throw_next_default) {
+            throw_next_default = false;
+            default_calls_before_throw = -1;
+            throw std::runtime_error("simulated default construction failure on slot reset");
+        }
+        if (default_calls_before_throw > 0) {
+            --default_calls_before_throw;
+        }
+    }
+
+    explicit ResetThrowTracker(int v) noexcept : value(v), moved_from(false) {}
+
+    ResetThrowTracker(ResetThrowTracker&& other) noexcept
+        : value(other.value), moved_from(false) {
+        other.value = -1;
+        other.moved_from = true;
+    }
+
+    ResetThrowTracker& operator=(ResetThrowTracker&& other) noexcept {
+        if (this != &other) {
+            value = other.value;
+            moved_from = false;
+            other.value = -1;
+            other.moved_from = true;
+        }
+        return *this;
+    }
+
+    ~ResetThrowTracker() noexcept {}
+};
+
 static_assert(CanInstantiateSpscRing<int, 8>);
 static_assert(CanInstantiateSpscRing<EventFrame, 16>);
 static_assert(CanInstantiateSpscRing<std::unique_ptr<int>, 8>);
@@ -420,6 +459,50 @@ TEST(SpscRingTest, ExceptionDuringWriteReservationCancelsCleanly) {
     EXPECT_EQ(read->sequence_id, 888U);
     read.commit();
     EXPECT_TRUE(ring.empty());
+}
+
+TEST(SpscRingTest, StrongExceptionSafetyWhenSlotResetThrows) {
+    ResetThrowTracker::throw_next_default = false;
+    ResetThrowTracker::default_calls_before_throw = -1;
+
+    SpscRingBuffer<ResetThrowTracker, 8> ring;
+    ASSERT_TRUE(ring.try_emplace(42));
+
+    ResetThrowTracker out(-99);
+    ResetThrowTracker::throw_next_default = true;
+    EXPECT_THROW((void)ring.try_pop(out), std::runtime_error);
+
+    // Slot was NOT moved from, `out` is unchanged, and tail did not advance.
+    EXPECT_EQ(out.value, -99);
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    ASSERT_TRUE(ring.try_pop(out));
+    EXPECT_EQ(out.value, 42);
+    EXPECT_FALSE(out.moved_from);
+    EXPECT_TRUE(ring.empty());
+
+    // Batch pop: second item throws on slot reset -> first item succeeds and commits,
+    // second item remains intact in the ring for a retry.
+    ASSERT_TRUE(ring.try_emplace(111));
+    ASSERT_TRUE(ring.try_emplace(222));
+
+    std::array<ResetThrowTracker, 2> batch_out{
+        ResetThrowTracker(-99), ResetThrowTracker(-99)};
+    ResetThrowTracker::default_calls_before_throw = 1;
+    EXPECT_THROW((void)ring.try_pop_batch(batch_out.data(), 2), std::runtime_error);
+
+    EXPECT_EQ(batch_out[0].value, 111);
+    EXPECT_EQ(batch_out[1].value, -99);
+    EXPECT_EQ(ring.size_approx(), 1U);
+
+    ResetThrowTracker retry(-99);
+    ASSERT_TRUE(ring.try_pop(retry));
+    EXPECT_EQ(retry.value, 222);
+    EXPECT_FALSE(retry.moved_from);
+    EXPECT_TRUE(ring.empty());
+
+    ResetThrowTracker::throw_next_default = false;
+    ResetThrowTracker::default_calls_before_throw = -1;
 }
 
 #ifndef NDEBUG

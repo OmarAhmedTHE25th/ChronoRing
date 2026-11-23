@@ -129,17 +129,9 @@ public:
         if (diff < 0) {
             return false;
         }
-        out = std::move(slot.data);
-        if constexpr (!std::is_trivially_destructible_v<T>) {
-            slot.data = T{};
-        }
+        pop_slot_strong(slot.data, out);
         slot.sequence.store(pos + Capacity, std::memory_order_release);
-        dequeue_pos_.store(pos + 1, std::memory_order_relaxed);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (waiters_full_.load(std::memory_order_relaxed) != 0) {
-            not_full_epoch_.fetch_add(1, std::memory_order_release);
-            not_full_epoch_.notify_all();
-        }
+        commit_pop_pos(pos + 1);
         return true;
     }
 
@@ -150,29 +142,35 @@ public:
         }
         std::size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
         std::size_t popped = 0;
-        while (popped < max_count) {
-            Slot& slot = slots_[pos & kMask];
-            const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
-            const std::ptrdiff_t diff =
-                static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
-            if (diff < 0) {
-                break;
+        auto pop_loop = [&]() {
+            while (popped < max_count) {
+                Slot& slot = slots_[pos & kMask];
+                const std::size_t seq = slot.sequence.load(std::memory_order_acquire);
+                const std::ptrdiff_t diff =
+                    static_cast<std::ptrdiff_t>(seq) - static_cast<std::ptrdiff_t>(pos + 1);
+                if (diff < 0) {
+                    break;
+                }
+                pop_slot_strong(slot.data, out[popped]);
+                slot.sequence.store(pos + Capacity, std::memory_order_release);
+                ++pos;
+                ++popped;
             }
-            out[popped] = std::move(slot.data);
-            if constexpr (!std::is_trivially_destructible_v<T>) {
-                slot.data = T{};
+        };
+        if constexpr (kSlotResetNothrow) {
+            pop_loop();
+        } else {
+            try {
+                pop_loop();
+            } catch (...) {
+                if (popped > 0) {
+                    commit_pop_pos(pos);
+                }
+                throw;
             }
-            slot.sequence.store(pos + Capacity, std::memory_order_release);
-            ++pos;
-            ++popped;
         }
         if (popped > 0) {
-            dequeue_pos_.store(pos, std::memory_order_relaxed);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            if (waiters_full_.load(std::memory_order_relaxed) != 0) {
-                not_full_epoch_.fetch_add(1, std::memory_order_release);
-                not_full_epoch_.notify_all();
-            }
+            commit_pop_pos(pos);
         }
         return popped;
     }
@@ -298,6 +296,27 @@ public:
     }
 
 private:
+    static void pop_slot_strong(T& slot, T& out) noexcept(kSlotResetNothrow) {
+        if constexpr (std::is_trivially_destructible_v<T>) {
+            out = std::move(slot);
+        } else {
+            // Prepare empty replacement before moving from `slot` so a throwing
+            // default constructor leaves `slot` and `out` untouched.
+            T empty_slot{};
+            out = std::move(slot);
+            slot = std::move(empty_slot);
+        }
+    }
+
+    void commit_pop_pos(std::size_t new_pos) noexcept {
+        dequeue_pos_.store(new_pos, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (waiters_full_.load(std::memory_order_relaxed) != 0) {
+            not_full_epoch_.fetch_add(1, std::memory_order_release);
+            not_full_epoch_.notify_all();
+        }
+    }
+
     struct alignas(kCacheLineSize) Slot {
         std::atomic<std::size_t> sequence{0};
         T data{};
