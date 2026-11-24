@@ -99,12 +99,13 @@ struct Sha256Ctx {
         bitlen += static_cast<std::uint64_t>(len) * 8ULL;
 
         std::size_t offset = 0;
-        if (block_len > 0) {
-            const std::size_t take = std::min(64U - block_len, len);
+        if (block_len > 0 && block_len < block.size()) {
+            const std::size_t space = block.size() - block_len;
+            const std::size_t take = std::min(space, len);
             std::memcpy(block.data() + block_len, bytes, take);
             block_len += take;
             offset += take;
-            if (block_len == 64U) {
+            if (block_len == block.size()) {
                 compress(block.data());
                 block_len = 0;
             }
