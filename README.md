@@ -244,6 +244,16 @@ python3 tools/chronoring_selfhost.py examples/detectors/cryo_snspd_array.ddl.jso
 PYTHONPATH=python python3 -m chronoring.dashboard --host 127.0.0.1 --port 8080 --crng run.crng
 ```
 
+### Live CLI & Test Run Screenshots
+
+**Live Pipeline Demo & Offline SoA Replay (`--demo` / `--replay`):**
+
+![ChronoRing CLI Demo and Replay Terminal](docs/images/cli-demo-terminal.png)
+
+**Full Unit & Integration Test Suite (`ctest --test-dir build --output-on-failure`):**
+
+![ChronoRing CTest 16/16 Passing Terminal](docs/images/ctest-terminal.png)
+
 ---
 
 ## Formal Models & Arithmetic Lemmas

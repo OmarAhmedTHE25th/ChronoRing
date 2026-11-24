@@ -346,6 +346,39 @@ function highlightCpp(source: string): string {
       </div>
     </div>
 
+    <!-- Live CLI & Test Run Screenshots -->
+    <div class="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <figure class="overflow-hidden rounded-xl border border-white/[0.1] bg-[#0B0E14] shadow-xl">
+        <div class="flex items-center justify-between border-b border-white/[0.08] bg-[#111622] px-4 py-2.5">
+          <span class="font-mono text-xs font-medium text-[#CBD5E1]">CLI Demo &amp; Offline SoA Replay</span>
+          <span class="rounded-full border border-[#14B8A6]/35 bg-[#14B8A6]/10 px-2.5 py-0.5 font-mono text-[10px] font-medium text-[#5EEAD4]">
+            --demo &amp; --replay
+          </span>
+        </div>
+        <img
+          src="/images/cli-demo-terminal.png"
+          alt="ChronoRing CLI live telemetry pipeline demo and offline SoA replay terminal output"
+          class="block w-full h-auto"
+          loading="lazy"
+        />
+      </figure>
+
+      <figure class="overflow-hidden rounded-xl border border-white/[0.1] bg-[#0B0E14] shadow-xl">
+        <div class="flex items-center justify-between border-b border-white/[0.08] bg-[#111622] px-4 py-2.5">
+          <span class="font-mono text-xs font-medium text-[#CBD5E1]">CTest Unit &amp; Integration Suite</span>
+          <span class="rounded-full border border-[#3B82F6]/35 bg-[#3B82F6]/10 px-2.5 py-0.5 font-mono text-[10px] font-medium text-[#93C5FD]">
+            16 / 16 Passed
+          </span>
+        </div>
+        <img
+          src="/images/ctest-terminal.png"
+          alt="ChronoRing CTest suite passing 16 out of 16 tests in terminal"
+          class="block w-full h-auto"
+          loading="lazy"
+        />
+      </figure>
+    </div>
+
     <div class="mt-8">
       <a
         href={includeUrl}
