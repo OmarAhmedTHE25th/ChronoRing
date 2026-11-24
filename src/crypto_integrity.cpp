@@ -357,12 +357,13 @@ Sha256Digest PageMerkleTree::hash_leaf(const void* data, std::size_t len) noexce
 
 Sha256Digest PageMerkleTree::hash_node(const Sha256Digest& left,
                                        const Sha256Digest& right) noexcept {
-    Sha256Ctx ctx;
-    const std::uint8_t domain = 0x01U;
-    ctx.update(&domain, 1);
-    ctx.update(left.data(), left.size());
-    ctx.update(right.data(), right.size());
-    return ctx.finish();
+    std::array<std::uint8_t, 65> buf{};
+    buf[0] = 0x01U;
+    for (std::size_t i = 0; i < 32; ++i) {
+        buf[1 + i] = left[i];
+        buf[33 + i] = right[i];
+    }
+    return sha256(buf.data(), buf.size());
 }
 
 Sha256Digest PageMerkleTree::append_page(const void* data, std::size_t len) {
@@ -382,18 +383,17 @@ Sha256Digest PageMerkleTree::root() const {
         return sha256(nullptr, 0);
     }
     std::vector<Sha256Digest> level = leaves_;
+    std::vector<Sha256Digest> next;
     while (level.size() > 1) {
-        std::vector<Sha256Digest> next;
-        next.reserve((level.size() + 1) / 2);
-        for (std::size_t i = 0; i < level.size(); i += 2) {
-            if (i + 1 < level.size()) {
-                next.push_back(hash_node(level[i], level[i + 1]));
-            } else {
-                // Promote odd trailing node directly via self-hash pair to maintain uniform height.
-                next.push_back(hash_node(level[i], level[i]));
-            }
+        const std::size_t n = level.size();
+        next.clear();
+        next.reserve((n >> 1U) + (n & 1U));
+        for (std::size_t i = 0; i < n; i += 2) {
+            const Sha256Digest& left = level[i];
+            const Sha256Digest& right = (i + 1 < n) ? level[i + 1] : left;
+            next.push_back(hash_node(left, right));
         }
-        level = std::move(next);
+        level.swap(next);
     }
     return level.front();
 }
